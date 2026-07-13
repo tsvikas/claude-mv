@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
 # dependencies = ["cyclopts>=3"]
@@ -63,7 +63,7 @@ def to_abs(p: Path | str) -> str:
     Symlinks are left unresolved so the result matches the path the user refers to
     (and, for the destination, the path they will `cd` into).
     """
-    return os.path.abspath(os.path.expanduser(str(p)))
+    return os.path.abspath(Path(p).expanduser())
 
 
 def read_root_cwd(project_dir: Path, enc_name: str) -> str | None:
@@ -140,7 +140,7 @@ def _atomic_write(path: Path, lines: list[str]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.writelines(lines)
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -525,7 +525,7 @@ def main(
     if cjson_hits:
         backup_items.append(claude_json)
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     backup_root = claude_dir / "claude-mv-backups" / f"{stamp}-{enc_old}"
     backup_pairs = _backup(backup_items, backup_root)
     print(f"  backup   : {backup_root}")
