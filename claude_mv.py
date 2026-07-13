@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["cyclopts>=3"]
+# ///
+"""Move a project's Claude Code bookkeeping when its directory is renamed or moved.
+
+Claude Code stores each project's sessions under `~/.claude/projects/<encoded-path>/`,
+where the directory name is the project's absolute path with every non-alphanumeric
+character replaced by `-`.
+Rename the project on disk and that encoded name no longer matches, so Claude Code
+starts a fresh, empty history and the old sessions look lost.
+
+This tool repoints the bookkeeping at the new path:
+it renames the `projects/<encoded>` directory, rewrites the `cwd` field inside the
+session `*.jsonl` files, and rewrites the `project` field in `~/.claude/history.jsonl`.
+By default it touches nothing outside `~/.claude`; pass `--move-dir` to also move the
+real project directory.
+
+Run with `uv run claude_mv.py OLD NEW`, or install cyclopts and run directly.
+"""
+
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Annotated, Literal
+
+from cyclopts import App, Parameter
+
+DEFAULT_CLAUDE_DIR = Path.home() / ".claude"
+
+app = App(
+    name="claude-mv",
+    help="Move a project's Claude Code history when its directory is renamed.",
+)
+
+
+# Claude Code's path encoding: every non-alphanumeric character becomes '-'.
+# Verified against 62/62 local project dirs, including paths with '_', spaces, '@',
+# and '+'. The mapping is lossy (many characters collapse to '-') and therefore NOT
+# invertible: never try to recover a real path from an encoded directory name.
+def encode_path(abs_path: str) -> str:
+    """Encode an absolute path the way Claude Code names its `projects/` subdir."""
+    return re.sub(r"[^a-zA-Z0-9]", "-", abs_path)
+
+
+def to_abs(p: Path | str) -> str:
+    """Expand `~` and normalize to an absolute path string, without touching disk.
+
+    Symlinks are left unresolved so the result matches the path the user refers to
+    (and, for the destination, the path they will `cd` into).
+    """
+    return os.path.abspath(os.path.expanduser(str(p)))
+
+
+def read_root_cwd(project_dir: Path, enc_name: str) -> str | None:
+    """Return the project's root path as Claude Code recorded it, or None.
+
+    A project dir can hold sessions whose `cwd` is a subdirectory (e.g. a worktree),
+    so we don't just take the first one. The root is the recorded `cwd` that encodes
+    back to the directory's own name `enc_name`; a subdirectory encodes to a longer,
+    different name. This authoritative stored string is preferred over re-deriving the
+    path from the user's argument, which handles symlinks and alternate spellings.
+    """
+    for jsonl in sorted(project_dir.glob("*.jsonl")):
+        try:
+            with jsonl.open(encoding="utf-8") as fh:
+                for line in fh:
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    cwd = obj.get("cwd")
+                    if isinstance(cwd, str) and cwd and encode_path(cwd) == enc_name:
+                        return cwd
+        except OSError:
+            continue
+    return None
+
+
+def find_project_dir(projects_dir: Path, old_abs: str) -> tuple[Path | None, str]:
+    """Locate `projects/<encoded>` for `old_abs`.
+
+    Returns (dir_or_None, encoded_name). Falls back to the symlink-resolved path, then
+    to scanning every project's recorded `cwd`, so a slightly different spelling of the
+    old path (trailing slash, symlink, ..) still finds the right directory.
+    """
+    enc = encode_path(old_abs)
+    direct = projects_dir / enc
+    if direct.is_dir():
+        return direct, enc
+
+    real = os.path.realpath(old_abs)
+    if real != old_abs:
+        enc_real = encode_path(real)
+        cand = projects_dir / enc_real
+        if cand.is_dir():
+            return cand, enc_real
+
+    if projects_dir.is_dir():
+        for sub in projects_dir.iterdir():
+            if not sub.is_dir():
+                continue
+            cwd = read_root_cwd(sub, sub.name)
+            if cwd and to_abs(cwd) == old_abs:
+                return sub, sub.name
+    return None, enc
+
+
+def remap(value: str, old: str, new: str) -> str | None:
+    """Return `value` with an `old` path prefix swapped for `new`, or None if unchanged.
+
+    The `old + os.sep` boundary check keeps `/proj` from matching `/proj-2`.
+    """
+    if value == old:
+        return new
+    if value.startswith(old + os.sep):
+        return new + value[len(old) :]
+    return None
+
+
+def _atomic_write(path: Path, lines: list[str]) -> None:
+    """Replace `path` with `lines` via a temp file in the same dir, then os.replace."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _rewrite_field(path: Path, field: str, old: str, new: str, *, apply: bool) -> int:
+    """Rewrite one top-level JSON `field` per line where it holds the old path.
+
+    Only lines that literally contain `old` are parsed, and only the target `field` is
+    changed. A line that needs no edit keeps its exact original bytes. A line that does
+    get edited is re-serialized, but only `field` changes value, so an incidental path
+    mention elsewhere on that line (a logged shell command, captured tool output) keeps
+    its text. Returns the number of lines that changed (or would change).
+    """
+    if not path.exists():
+        return 0
+    changed = 0
+    out: list[str] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if old not in line:
+                out.append(line)
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                out.append(line)
+                continue
+            value = obj.get(field)
+            new_value = remap(value, old, new) if isinstance(value, str) else None
+            if new_value is None:
+                out.append(line)
+                continue
+            obj[field] = new_value
+            changed += 1
+            newline = "\n" if line.endswith("\n") else ""
+            dumped = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+            out.append(dumped + newline)
+    if apply and changed:
+        _atomic_write(path, out)
+    return changed
+
+
+def _merge_move(src: Path, dst: Path, warnings: list[str]) -> None:
+    """Move everything from `src` into `dst`, recursing into shared subdirectories.
+
+    Session files are UUID-named and never collide. On a genuine file collision (e.g.
+    two `memory/` entries) the incoming file is kept under a suffixed name rather than
+    silently overwriting or dropping either side.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            if target.is_dir():
+                _merge_move(item, target, warnings)
+                item.rmdir()
+            else:
+                shutil.move(str(item), str(target))
+        elif target.exists():
+            kept = dst / f"{item.name}.merged-from-source"
+            shutil.move(str(item), str(kept))
+            warnings.append(f"collision: kept both, incoming saved as {kept.name}")
+        else:
+            shutil.move(str(item), str(target))
+
+
+def _backup(items: list[Path], enc_old: str, claude_dir: Path) -> Path:
+    """Copy each existing item into a fresh timestamped backup dir; return that dir."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    root = claude_dir / "claude-mv-backups" / f"{stamp}-{enc_old}"
+    root.mkdir(parents=True, exist_ok=True)
+    for item in items:
+        if not item.exists():
+            continue
+        dest = root / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest)
+        else:
+            shutil.copy2(item, dest)
+    return root
+
+
+def _restore(backup_root: Path, items: list[Path]) -> None:
+    """Restore each item from `backup_root`, replacing whatever is there now."""
+    for item in items:
+        saved = backup_root / item.name
+        if not saved.exists():
+            continue
+        if item.is_dir():
+            shutil.rmtree(item, ignore_errors=True)
+        elif item.exists():
+            item.unlink()
+        if saved.is_dir():
+            shutil.copytree(saved, item)
+        else:
+            shutil.copy2(saved, item)
+
+
+def _confirm(prompt: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+@app.default
+def main(
+    old: str,
+    new: str,
+    *,
+    on_conflict: Literal["abort", "merge", "clean"] = "abort",
+    move_dir: bool = False,
+    dry_run: Annotated[bool, Parameter(alias="-n")] = False,
+    yes: Annotated[bool, Parameter(alias="-y")] = False,
+    force: bool = False,
+    claude_dir: Path = DEFAULT_CLAUDE_DIR,
+) -> int:
+    """Repoint Claude Code's bookkeeping from an old project path to a new one.
+
+    Parameters
+    ----------
+    old
+        The project's old absolute path (before the rename/move). `~`, relative paths,
+        and `..` are resolved. The directory need not still exist.
+    new
+        The project's new absolute path (after the rename/move).
+    on_conflict
+        What to do if the destination already has Claude history: `abort` (default),
+        `merge` old sessions into it, or `clean` (back up and replace it). `merge` and
+        `clean` refuse unless the existing history actually belongs to this project.
+    move_dir
+        Also move the real project directory from `old` to `new` (default: leave the
+        filesystem alone and only fix `~/.claude`).
+    dry_run
+        Show what would change and touch nothing.
+    yes
+        Skip the confirmation prompt. Required to proceed in a non-interactive shell.
+    force
+        Override the safety check that the destination history belongs to this project.
+    claude_dir
+        Location of the Claude data directory (default: `~/.claude`). For testing.
+    """
+    old_abs = to_abs(old)
+    new_abs = to_abs(new)
+    if old_abs == new_abs:
+        print("Old and new paths resolve to the same location; nothing to do.")
+        return 1
+
+    projects_dir = claude_dir / "projects"
+    history_file = claude_dir / "history.jsonl"
+
+    src_dir, enc_old = find_project_dir(projects_dir, old_abs)
+    enc_new = encode_path(new_abs)
+    dst_dir = projects_dir / enc_new
+
+    # The authoritative old-path string is the project root as Claude actually stored
+    # it, if we found it. Falling back to the user's argument covers the rare dir with
+    # no root-level cwd on record.
+    old_stored = (read_root_cwd(src_dir, enc_old) if src_dir else None) or old_abs
+
+    n_sessions = len(list(src_dir.glob("*.jsonl"))) if src_dir else 0
+    cwd_hits = (
+        sum(
+            _rewrite_field(f, "cwd", old_stored, new_abs, apply=False)
+            for f in src_dir.glob("*.jsonl")
+        )
+        if src_dir
+        else 0
+    )
+    hist_hits = _rewrite_field(
+        history_file, "project", old_stored, new_abs, apply=False
+    )
+
+    print("claude-mv plan")
+    print(f"  old path : {old_stored}")
+    print(f"  new path : {new_abs}")
+    print(f"  projects/: {enc_old}  ->  {enc_new}")
+    if src_dir is None:
+        print("  (no projects/ directory found for the old path)")
+    else:
+        print(
+            f"  sessions : {n_sessions} file(s), {cwd_hits} cwd reference(s) to rewrite"
+        )
+    print(f"  history  : {hist_hits} line(s) to rewrite in history.jsonl")
+    if move_dir:
+        print(f"  move dir : {old_abs}  ->  {new_abs}  (real directory)")
+
+    if src_dir is None and hist_hits == 0:
+        print("Nothing to do.")
+        return 0
+
+    # Conflict handling. The encoding is lossy, so an existing destination dir may
+    # belong to a *different* real project that happens to encode identically. Only
+    # treat it as this project's history if its recorded cwd resolves to old or new.
+    conflict = src_dir is not None and dst_dir.exists()
+    if conflict:
+        dst_cwd = read_root_cwd(dst_dir, enc_new)
+        dst_resolved = to_abs(dst_cwd) if dst_cwd else None
+        related = dst_resolved in {new_abs, old_abs, to_abs(old_stored)}
+        print(
+            f"  CONFLICT : destination {enc_new} already exists"
+            f" (belongs to {dst_cwd or 'unknown'})"
+        )
+        if not related and not force:
+            print(
+                "Refusing: the existing destination history belongs to a different"
+                " project (encoding collision)."
+                " Re-run with --force only if you are sure."
+            )
+            return 2
+        if on_conflict == "abort":
+            print(
+                "Destination exists. Re-run with --on-conflict merge|clean to proceed."
+            )
+            return 2
+
+    if dry_run:
+        print("Dry run: no changes made.")
+        return 0
+
+    if not yes:
+        if not sys.stdin.isatty():
+            print("Refusing to proceed without --yes in a non-interactive shell.")
+            return 1
+        if not _confirm("Proceed? [y/N] "):
+            print("Aborted.")
+            return 1
+
+    backup_items = [
+        p for p in (src_dir, dst_dir if conflict else None, history_file) if p
+    ]
+    backup_root = _backup(backup_items, enc_old, claude_dir)
+    print(f"  backup   : {backup_root}")
+
+    moved_real = False
+    try:
+        if move_dir:
+            if not Path(old_abs).exists():
+                raise FileNotFoundError(
+                    f"--move-dir: source directory not found: {old_abs}"
+                )
+            if Path(new_abs).exists():
+                raise FileExistsError(
+                    f"--move-dir: destination already exists: {new_abs}"
+                )
+            Path(new_abs).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(old_abs, new_abs)
+            moved_real = True
+
+        warnings: list[str] = []
+        if src_dir is not None:
+            if conflict and on_conflict == "clean":
+                shutil.rmtree(dst_dir)
+                src_dir.rename(dst_dir)
+            elif conflict and on_conflict == "merge":
+                _merge_move(src_dir, dst_dir, warnings)
+                src_dir.rmdir()
+            else:
+                src_dir.rename(dst_dir)
+
+            for jsonl in dst_dir.glob("*.jsonl"):
+                _rewrite_field(jsonl, "cwd", old_stored, new_abs, apply=True)
+
+        _rewrite_field(history_file, "project", old_stored, new_abs, apply=True)
+    except BaseException as exc:
+        print(f"Error: {exc}\nRolling back...", file=sys.stderr)
+        if moved_real and Path(new_abs).exists() and not Path(old_abs).exists():
+            shutil.move(new_abs, old_abs)
+        _restore(backup_root, backup_items)
+        print("Rolled back to the pre-move state.", file=sys.stderr)
+        raise
+
+    print("Done.")
+    for w in warnings:
+        print(f"  note: {w}")
+    return 0
+
+
+if __name__ == "__main__":
+    app()
