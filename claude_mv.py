@@ -26,6 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -66,6 +67,24 @@ def to_abs(p: Path | str) -> str:
     return os.path.abspath(Path(p).expanduser())
 
 
+def _iter_cwds(project_dir: Path) -> Iterator[str]:
+    """Yield every non-empty `cwd` string recorded across a project's session files."""
+    for jsonl in sorted(project_dir.glob("*.jsonl")):
+        try:
+            with jsonl.open(encoding="utf-8") as fh:
+                for line in fh:
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        cwd = json.loads(line).get("cwd")
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(cwd, str) and cwd:
+                        yield cwd
+        except OSError:
+            continue
+
+
 def read_root_cwd(project_dir: Path, enc_name: str) -> str | None:
     """Return the project's root path as Claude Code recorded it, or None.
 
@@ -75,21 +94,9 @@ def read_root_cwd(project_dir: Path, enc_name: str) -> str | None:
     different name. This authoritative stored string is preferred over re-deriving the
     path from the user's argument, which handles symlinks and alternate spellings.
     """
-    for jsonl in sorted(project_dir.glob("*.jsonl")):
-        try:
-            with jsonl.open(encoding="utf-8") as fh:
-                for line in fh:
-                    if '"cwd"' not in line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    cwd = obj.get("cwd")
-                    if isinstance(cwd, str) and cwd and encode_path(cwd) == enc_name:
-                        return cwd
-        except OSError:
-            continue
+    for cwd in _iter_cwds(project_dir):
+        if encode_path(cwd) == enc_name:
+            return cwd
     return None
 
 
@@ -142,22 +149,9 @@ def cwd_targets(project_dir: Path, old: str, new: str) -> tuple[bool, bool]:
     partial migration, which the caller refuses unless explicitly told to finish it.
     """
     has_old = has_new = False
-    for jsonl in project_dir.glob("*.jsonl"):
-        try:
-            with jsonl.open(encoding="utf-8") as fh:
-                for line in fh:
-                    if '"cwd"' not in line:
-                        continue
-                    try:
-                        cwd = json.loads(line).get("cwd")
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(cwd, str):
-                        continue
-                    has_old = has_old or _under(cwd, old)
-                    has_new = has_new or _under(cwd, new)
-        except OSError:
-            continue
+    for cwd in _iter_cwds(project_dir):
+        has_old = has_old or _under(cwd, old)
+        has_new = has_new or _under(cwd, new)
         if has_old and has_new:
             break
     return has_old, has_new
@@ -175,6 +169,26 @@ def _atomic_write(path: Path, lines: list[str]) -> None:
         raise
 
 
+def _rewrite_lines(path: Path, transform: Callable[[str], str], *, apply: bool) -> int:
+    """Apply `transform` to each line of `path`; write back if any changed.
+
+    Returns the number of changed lines. A transform signals "no change" by returning
+    the identical line, so lines that need no edit keep their exact original bytes.
+    """
+    if not path.exists():
+        return 0
+    changed = 0
+    out: list[str] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            new_line = transform(line)
+            changed += new_line != line
+            out.append(new_line)
+    if apply and changed:
+        _atomic_write(path, out)
+    return changed
+
+
 def _rewrite_field(path: Path, field: str, old: str, new: str, *, apply: bool) -> int:
     """Rewrite one top-level JSON `field` per line where it holds the old path.
 
@@ -184,33 +198,23 @@ def _rewrite_field(path: Path, field: str, old: str, new: str, *, apply: bool) -
     mention elsewhere on that line (a logged shell command, captured tool output) keeps
     its text. Returns the number of lines that changed (or would change).
     """
-    if not path.exists():
-        return 0
-    changed = 0
-    out: list[str] = []
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            if old not in line:
-                out.append(line)
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                out.append(line)
-                continue
-            value = obj.get(field)
-            new_value = remap(value, old, new) if isinstance(value, str) else None
-            if new_value is None:
-                out.append(line)
-                continue
-            obj[field] = new_value
-            changed += 1
-            newline = "\n" if line.endswith("\n") else ""
-            dumped = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-            out.append(dumped + newline)
-    if apply and changed:
-        _atomic_write(path, out)
-    return changed
+
+    def transform(line: str) -> str:
+        if old not in line:
+            return line
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return line
+        value = obj.get(field)
+        new_value = remap(value, old, new) if isinstance(value, str) else None
+        if new_value is None:
+            return line
+        obj[field] = new_value
+        newline = "\n" if line.endswith("\n") else ""
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + newline
+
+    return _rewrite_lines(path, transform, apply=apply)
 
 
 def _replace_paths_in_text(text: str, old: str, new: str) -> str:
@@ -247,41 +251,24 @@ def _rewrite_content(path: Path, old: str, new: str, *, apply: bool) -> int:
     """Replace every path mention of `old` with `new` in a file's raw text.
 
     The opt-in counterpart to the field-scoped rewrite: this also changes incidental
-    mentions in logged commands and captured output. Returns the number of lines that
-    changed. Paths carry no JSON-special characters, so raw-text replacement keeps the
-    JSONL valid.
+    mentions in logged commands and captured output. Paths carry no JSON-special
+    characters, so raw-text replacement keeps the JSONL valid.
     """
-    if not path.exists():
-        return 0
-    changed = 0
-    out: list[str] = []
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            new_line = _replace_paths_in_text(line, old, new)
-            if new_line != line:
-                changed += 1
-            out.append(new_line)
-    if apply and changed:
-        _atomic_write(path, out)
-    return changed
+    return _rewrite_lines(
+        path, lambda line: _replace_paths_in_text(line, old, new), apply=apply
+    )
 
 
-def rewrite_session(
-    path: Path, old: str, new: str, *, content: bool, apply: bool
+def rewrite_jsonl(
+    path: Path, field: str, old: str, new: str, *, content: bool, apply: bool
 ) -> int:
-    """Rewrite a session file: all path mentions if `content`, else just `cwd`."""
+    """Rewrite a JSONL file: all path mentions if `content`, else just `field`.
+
+    `field` is `cwd` for session files, `project` for history.jsonl.
+    """
     if content:
         return _rewrite_content(path, old, new, apply=apply)
-    return _rewrite_field(path, "cwd", old, new, apply=apply)
-
-
-def rewrite_history(
-    path: Path, old: str, new: str, *, content: bool, apply: bool
-) -> int:
-    """Rewrite history.jsonl: all path mentions if `content`, else just `project`."""
-    if content:
-        return _rewrite_content(path, old, new, apply=apply)
-    return _rewrite_field(path, "project", old, new, apply=apply)
+    return _rewrite_field(path, field, old, new, apply=apply)
 
 
 def _remap_json(obj: object, old: str, new: str) -> tuple[object, int]:
@@ -527,16 +514,21 @@ def main(
     n_sessions = len(list(src_dir.glob("*.jsonl"))) if src_dir else 0
     sess_hits = (
         sum(
-            rewrite_session(
-                f, old_stored, new_abs, content=rewrite_content, apply=False
+            rewrite_jsonl(
+                f, "cwd", old_stored, new_abs, content=rewrite_content, apply=False
             )
             for f in src_dir.glob("*.jsonl")
         )
         if src_dir
         else 0
     )
-    hist_hits = rewrite_history(
-        history_file, old_stored, new_abs, content=rewrite_content, apply=False
+    hist_hits = rewrite_jsonl(
+        history_file,
+        "project",
+        old_stored,
+        new_abs,
+        content=rewrite_content,
+        apply=False,
     )
     cjson_hits = _rewrite_claude_json(claude_json, old_stored, new_abs, apply=False)
 
@@ -557,7 +549,7 @@ def main(
     move_pending = move_dir and old_exists and not new_exists
     move_done = move_dir and new_exists and not old_exists
     move_bad = move_dir and not (move_pending or move_done)
-    dir_move_pending = src_dir is not None and not migrated
+    projects_rename_pending = src_dir is not None and not migrated
 
     has_old_cwd, has_new_cwd = (
         cwd_targets(src_dir, old_stored, new_abs) if src_dir else (False, False)
@@ -620,7 +612,7 @@ def main(
         return 2
 
     any_work = bool(
-        dir_move_pending
+        projects_rename_pending
         or sess_hits
         or hist_hits
         or cjson_hits
@@ -707,8 +699,13 @@ def main(
                 created.append(dst_dir)
 
             for jsonl in dst_dir.glob("*.jsonl"):
-                rewrite_session(
-                    jsonl, old_stored, new_abs, content=rewrite_content, apply=True
+                rewrite_jsonl(
+                    jsonl,
+                    "cwd",
+                    old_stored,
+                    new_abs,
+                    content=rewrite_content,
+                    apply=True,
                 )
 
         for _name, src, dst in extra_moves:
@@ -720,8 +717,13 @@ def main(
                 src.rename(dst)
                 created.append(dst)
 
-        rewrite_history(
-            history_file, old_stored, new_abs, content=rewrite_content, apply=True
+        rewrite_jsonl(
+            history_file,
+            "project",
+            old_stored,
+            new_abs,
+            content=rewrite_content,
+            apply=True,
         )
         _rewrite_claude_json(claude_json, old_stored, new_abs, apply=True)
     except BaseException as exc:
