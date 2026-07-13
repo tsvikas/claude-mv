@@ -240,8 +240,9 @@ def _replace_paths_in_text(text: str, old: str, new: str) -> str:
         out.append(text[i:j])
         before = text[j - 1] if j > 0 else ""
         after = text[j + n] if j + n < len(text) else ""
-        on_boundary = not (before.isalnum() or before in "._-") and not (
-            after.isalnum() or after in "._-"
+        # A string edge ("") is a boundary; a filename char (alnum or ._-) is not.
+        on_boundary = not (before and (before.isalnum() or before in "._-")) and not (
+            after and (after.isalnum() or after in "._-")
         )
         out.append(new if on_boundary else old)
         i = j + n
@@ -427,10 +428,12 @@ def _confirm(prompt: str) -> bool:
 
 @dataclass
 class Plan:
-    """Everything resolved about one move: where things are and what work remains."""
+    """Everything resolved about one move: where things are and what work remains.
+
+    Stores only the facts read from disk; everything derivable from them is a property.
+    """
 
     claude_dir: Path
-    history_file: Path
     claude_json: Path
     old_abs: str
     new_abs: str
@@ -439,8 +442,7 @@ class Plan:
     enc_new: str
     src_dir: (
         Path | None
-    )  # the project dir to operate on (at enc_old, or enc_new if migrated)
-    dst_dir: Path
+    )  # the project dir to operate on (enc_old, or enc_new if migrated)
     migrated: bool  # already at enc_new from a prior run
     rewrite_content: bool
     n_sessions: int
@@ -448,17 +450,38 @@ class Plan:
     hist_hits: int
     cjson_hits: int
     extra_moves: list[tuple[str, Path, Path]]  # (sibling dir name, src, dst)
-    old_exists: bool  # real dirs, only meaningful with --move-dir
+    move_dir: bool
+    old_exists: bool  # real dirs, only meaningful with move_dir
     new_exists: bool
-    move_pending: bool
-    move_done: bool
-    move_bad: bool
-    projects_rename_pending: bool
     mixed: bool  # sessions reference both old and new (partial migration)
     cjson_collisions: list[str]
     conflict: bool  # a *different* project already sits at enc_new
     conflict_cwd: str | None
     conflict_related: bool
+
+    @property
+    def history_file(self) -> Path:
+        return self.claude_dir / "history.jsonl"
+
+    @property
+    def dst_dir(self) -> Path:
+        return self.claude_dir / "projects" / self.enc_new
+
+    @property
+    def move_pending(self) -> bool:
+        return self.move_dir and self.old_exists and not self.new_exists
+
+    @property
+    def move_done(self) -> bool:
+        return self.move_dir and self.new_exists and not self.old_exists
+
+    @property
+    def move_bad(self) -> bool:
+        return self.move_dir and not (self.move_pending or self.move_done)
+
+    @property
+    def projects_rename_pending(self) -> bool:
+        return self.src_dir is not None and not self.migrated
 
     @property
     def any_work(self) -> bool:
@@ -506,16 +529,12 @@ def resolve_plan(
     # found at the old location; otherwise (migrated, or not found) the user's argument.
     old_stored = (read_root_cwd(src_dir, enc_old) if src_dir else None) or old_abs
 
-    n_sessions = len(list(src_dir.glob("*.jsonl"))) if src_dir else 0
-    sess_hits = (
-        sum(
-            rewrite_jsonl(
-                f, "cwd", old_stored, new_abs, content=rewrite_content, apply=False
-            )
-            for f in src_dir.glob("*.jsonl")
+    session_files = sorted(src_dir.glob("*.jsonl")) if src_dir else []
+    sess_hits = sum(
+        rewrite_jsonl(
+            f, "cwd", old_stored, new_abs, content=rewrite_content, apply=False
         )
-        if src_dir
-        else 0
+        for f in session_files
     )
     hist_hits = rewrite_jsonl(
         history_file,
@@ -527,8 +546,8 @@ def resolve_plan(
     )
     cjson_hits = _rewrite_claude_json(claude_json, old_stored, new_abs, apply=False)
 
-    # Sibling dirs that some Claude Code versions key by the encoded path. Present
-    # only if
+    # Sibling dirs that some Claude Code versions key by the encoded path. Present only
+    # if
     # such a version created them; on current versions they are session-keyed, so the
     # `<encoded>` entry does not exist and the list is empty.
     extra_moves = [
@@ -537,22 +556,18 @@ def resolve_plan(
         if name != "projects" and (claude_dir / name / enc_old).exists()
     ]
 
-    # --move-dir moves the real directory. Its state is checked up front (so we fail
-    # cleanly, not mid-transaction) and supports resuming: pending if only old exists,
-    # done if only new does, inconsistent (bad) otherwise.
+    # --move-dir checks the real dir up front (so we fail cleanly, not mid-transaction).
+    # old_exists/new_exists are meaningful only when move_dir; Plan derives the
+    # pending/done/bad states from them.
     old_exists = Path(old_abs).exists() if move_dir else False
     new_exists = Path(new_abs).exists() if move_dir else False
-    move_pending = move_dir and old_exists and not new_exists
-    move_done = move_dir and new_exists and not old_exists
-    move_bad = move_dir and not (move_pending or move_done)
 
     has_old_cwd, has_new_cwd = (
         cwd_targets(src_dir, old_stored, new_abs) if src_dir else (False, False)
     )
 
-    # A *different* project already at enc_new. The encoding is lossy, so treat it as
-    # this
-    # project's history only if its recorded cwd resolves to old or new.
+    # A *different* project already sitting at enc_new. The encoding is lossy, so trust
+    # it as this project's history only if its recorded cwd resolves to old or new.
     conflict = src_dir is not None and not migrated and dst_dir.exists()
     conflict_cwd = read_root_cwd(dst_dir, enc_new) if conflict else None
     conflict_related = bool(
@@ -561,7 +576,6 @@ def resolve_plan(
 
     return Plan(
         claude_dir=claude_dir,
-        history_file=history_file,
         claude_json=claude_json,
         old_abs=old_abs,
         new_abs=new_abs,
@@ -569,20 +583,16 @@ def resolve_plan(
         enc_old=enc_old,
         enc_new=enc_new,
         src_dir=src_dir,
-        dst_dir=dst_dir,
         migrated=migrated,
         rewrite_content=rewrite_content,
-        n_sessions=n_sessions,
+        n_sessions=len(session_files),
         sess_hits=sess_hits,
         hist_hits=hist_hits,
         cjson_hits=cjson_hits,
         extra_moves=extra_moves,
+        move_dir=move_dir,
         old_exists=old_exists,
         new_exists=new_exists,
-        move_pending=move_pending,
-        move_done=move_done,
-        move_bad=move_bad,
-        projects_rename_pending=src_dir is not None and not migrated,
         mixed=has_old_cwd and has_new_cwd,
         cjson_collisions=claude_json_collisions(claude_json, old_stored, new_abs),
         conflict=conflict,
@@ -705,22 +715,27 @@ def _rollback(
         _restore_pair(original, saved)
 
 
+def _backup_items(plan: Plan) -> list[Path]:
+    """Everything execute may modify or delete: the source dir, any merge destinations
+    (restored wholesale on failure), history, and the config file. Non-existent entries
+    are dropped by `_backup`."""
+    items: list[Path] = [plan.src_dir] if plan.src_dir else []
+    if plan.conflict:
+        items.append(plan.dst_dir)
+    for _name, src, dst in plan.extra_moves:
+        items += [src, dst]
+    items.append(plan.history_file)
+    if plan.cjson_hits:
+        items.append(plan.claude_json)
+    return items
+
+
 def execute(plan: Plan, *, on_conflict: str) -> list[str]:
     """Back up, perform the move + rewrites, and roll back fully on any failure.
 
     Returns collected warnings; re-raises the original error after rolling back.
     """
-    # Back up everything we may modify or delete: the source dir, any merge destinations
-    # (restored wholesale on failure), history, and the config file.
-    backup_items: list[Path] = [plan.src_dir] if plan.src_dir else []
-    if plan.conflict:
-        backup_items.append(plan.dst_dir)
-    backup_items += [s for _n, s, _d in plan.extra_moves]
-    backup_items += [d for _n, _s, d in plan.extra_moves if d.exists()]
-    backup_items.append(plan.history_file)
-    if plan.cjson_hits:
-        backup_items.append(plan.claude_json)
-
+    backup_items = _backup_items(plan)
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     backup_root = plan.claude_dir / "claude-mv-backups" / f"{stamp}-{plan.enc_old}"
     backup_pairs = _backup(backup_items, backup_root)
