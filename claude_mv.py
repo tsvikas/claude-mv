@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.12"
 # dependencies = ["cyclopts>=3"]
 # ///
 """Move a project's Claude Code bookkeeping when its directory is renamed or moved.
