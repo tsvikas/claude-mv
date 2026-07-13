@@ -12,6 +12,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 import claude_mv
 
 
@@ -288,6 +290,39 @@ def test_claude_json_collision_identical_ok(tmp_path):
     code, out = run(cd, cj, OLD, NEW)
     assert code == 0
     assert set(json.loads(cj.read_text())["projects"]) == {NEW}
+
+
+def test_dry_run_conflict_returns_2(tmp_path):
+    # conflict refusal is evaluated before the dry-run gate, so exit is 2 not 0
+    cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}], E_NEW: [{"cwd": NEW}]})
+    code, out = run(cd, cj, OLD, NEW, dry_run=True)
+    assert code == 2
+
+
+def test_rollback_on_failure(tmp_path, monkeypatch):
+    cd, cj = build(
+        tmp_path,
+        sessions={E_OLD: [{"cwd": OLD}]},
+        history=[{"project": OLD}],
+        cjson={"projects": {OLD: {"a": 1}}},
+    )
+    # make the final step (.claude.json write) blow up mid-execute
+    original = claude_mv._rewrite_claude_json
+
+    def boom(path, old, new, *, apply):
+        if apply:
+            raise RuntimeError("boom")
+        return original(path, old, new, apply=apply)
+
+    monkeypatch.setattr(claude_mv, "_rewrite_claude_json", boom)
+    with pytest.raises(RuntimeError):
+        run(cd, cj, OLD, NEW)
+    # every mutation reverted
+    assert (cd / "projects" / E_OLD).exists()
+    assert not (cd / "projects" / E_NEW).exists()
+    assert cwds(cd, E_OLD) == [OLD]
+    assert json.loads((cd / "history.jsonl").read_text())["project"] == OLD
+    assert json.loads(cj.read_text())["projects"] == {OLD: {"a": 1}}
 
 
 def test_mixed_refused_then_heal(tmp_path):
