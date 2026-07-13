@@ -60,6 +60,23 @@ The old directory does not need to still exist, since the tool works from Claude
 By default it does not move your actual project directory.
 Pass `--move-dir` if you want it to.
 
+## Re-running (resumable)
+
+Running the same `OLD NEW` again is safe and resumable.
+If the default migration already happened, the tool notices that the project now lives at the new encoded name and only does the work that is left, rather than reporting "nothing found".
+
+So a common flow is to run it once, then re-run with an added flag:
+
+```bash
+uv run claude_mv.py ~/code/old ~/code/new                 # metadata only
+uv run claude_mv.py ~/code/old ~/code/new --rewrite-content # now also fix incidental mentions
+uv run claude_mv.py ~/code/old ~/code/new --move-dir        # now also move the real folder
+```
+
+Each of these steps is idempotent: once its work is done, re-running it just prints "Already migrated; nothing to do".
+The state is also verified.
+If `--move-dir` is asked for but the real directory is in an in-between state (both the old and new paths exist, or neither does), the tool refuses rather than guess.
+
 ## Why it is careful where the reference scripts are not
 
 This is a from-scratch reimplementation of the shell `claude-mv` scripts, written to avoid their data-loss modes.

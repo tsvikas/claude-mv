@@ -427,9 +427,21 @@ def main(
     enc_new = encode_path(new_abs)
     dst_dir = projects_dir / enc_new
 
+    # Resumability: if the default migration already ran, the project now lives at
+    # `enc_new` and `enc_old` is gone. Detect that so a re-run (say, to add
+    # --rewrite-content or --move-dir) resumes with the remaining work instead of
+    # finding nothing. Only trust `enc_new` as *this* project if its root cwd resolves
+    # to the new path, not an unrelated project that merely encodes the same.
+    migrated = False
+    if src_dir is None and dst_dir.is_dir():
+        dst_cwd = read_root_cwd(dst_dir, enc_new)
+        if dst_cwd and to_abs(dst_cwd) == new_abs:
+            src_dir = dst_dir
+            migrated = True
+
     # The authoritative old-path string is the project root as Claude actually stored
-    # it, if we found it. Falling back to the user's argument covers the rare dir with
-    # no root-level cwd on record.
+    # it, if we found it at the old location. When already migrated (cwd is now the new
+    # path) or not found, we fall back to the user's argument.
     old_stored = (read_root_cwd(src_dir, enc_old) if src_dir else None) or old_abs
 
     n_sessions = len(list(src_dir.glob("*.jsonl"))) if src_dir else 0
@@ -457,12 +469,25 @@ def main(
         if name != "projects" and (claude_dir / name / enc_old).exists()
     ]
 
+    # --move-dir moves the real directory. Check its state up front (to fail cleanly
+    # rather than mid-transaction) and to support resuming: pending if only the old dir
+    # exists, already done if only the new one does, inconsistent otherwise.
+    old_exists = Path(old_abs).exists() if move_dir else False
+    new_exists = Path(new_abs).exists() if move_dir else False
+    move_pending = move_dir and old_exists and not new_exists
+    move_done = move_dir and new_exists and not old_exists
+    move_bad = move_dir and not (move_pending or move_done)
+    dir_move_pending = src_dir is not None and not migrated
+
     print("claude-mv plan")
     print(f"  old path : {old_stored}")
     print(f"  new path : {new_abs}")
-    print(f"  projects/: {enc_old}  ->  {enc_new}")
+    if migrated:
+        print(f"  projects/: already at {enc_new} (migration done)")
+    else:
+        print(f"  projects/: {enc_old}  ->  {enc_new}")
     if src_dir is None:
-        print("  (no projects/ directory found for the old path)")
+        print("  (no projects/ directory found at the old or new path)")
     else:
         unit = "path mention(s)" if rewrite_content else "cwd reference(s)"
         print(f"  sessions : {n_sessions} file(s), {sess_hits} {unit} to rewrite")
@@ -470,17 +495,40 @@ def main(
         print(f"  {name}/: {enc_old}  ->  {enc_new}")
     print(f"  history  : {hist_hits} line(s) to rewrite in history.jsonl")
     print(f"  config   : {cjson_hits} entry(ies) to remap in .claude.json")
-    if move_dir:
+    if move_pending:
         print(f"  move dir : {old_abs}  ->  {new_abs}  (real directory)")
+    elif move_done:
+        print(f"  move dir : already at {new_abs}")
+    elif move_bad:
+        where = "both exist" if old_exists else "neither exists"
+        print(f"  move dir : cannot ({where})")
 
-    if src_dir is None and hist_hits == 0 and cjson_hits == 0 and not extra_moves:
-        print("Nothing to do.")
+    # Verify: --move-dir needs the real dir cleanly at exactly one of old/new.
+    if move_bad:
+        where = (
+            "both the old and new directories exist"
+            if old_exists
+            else "neither the old nor the new directory exists"
+        )
+        print(f"Refusing --move-dir: {where}; resolve it by hand first.")
+        return 2
+
+    any_work = bool(
+        dir_move_pending
+        or sess_hits
+        or hist_hits
+        or cjson_hits
+        or extra_moves
+        or move_pending
+    )
+    if not any_work:
+        print("Already migrated; nothing to do." if migrated else "Nothing to do.")
         return 0
 
     # Conflict handling. The encoding is lossy, so an existing destination dir may
     # belong to a *different* real project that happens to encode identically. Only
     # treat it as this project's history if its recorded cwd resolves to old or new.
-    conflict = src_dir is not None and dst_dir.exists()
+    conflict = src_dir is not None and not migrated and dst_dir.exists()
     if conflict:
         dst_cwd = read_root_cwd(dst_dir, enc_new)
         dst_resolved = to_abs(dst_cwd) if dst_cwd else None
@@ -534,21 +582,15 @@ def main(
     created: list[Path] = []  # paths a rename created; delete these on rollback
     moved_real = False
     try:
-        if move_dir:
-            if not Path(old_abs).exists():
-                raise FileNotFoundError(
-                    f"--move-dir: source directory not found: {old_abs}"
-                )
-            if Path(new_abs).exists():
-                raise FileExistsError(
-                    f"--move-dir: destination already exists: {new_abs}"
-                )
+        if move_pending:
             Path(new_abs).parent.mkdir(parents=True, exist_ok=True)
             shutil.move(old_abs, new_abs)
             moved_real = True
 
         if src_dir is not None:
-            if conflict and on_conflict == "clean":
+            if migrated:
+                pass  # project is already at enc_new; only the rewrites below remain
+            elif conflict and on_conflict == "clean":
                 shutil.rmtree(dst_dir)
                 src_dir.rename(dst_dir)
             elif conflict and on_conflict == "merge":
