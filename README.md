@@ -46,11 +46,15 @@ The old directory does not need to still exist, since the tool works from Claude
 
 ## What it changes
 
-Everything it touches lives inside `~/.claude`:
-
-1. Renames `projects/<encoded-old>` to `projects/<encoded-new>` (this carries the session files and the `memory/` subdir along with it).
+1. Renames `~/.claude/projects/<encoded-old>` to `<encoded-new>` (this carries the session files and the `memory/` subdir along with it).
 2. Rewrites the `cwd` field inside each session `*.jsonl`.
-3. Rewrites the `project` field in `history.jsonl`.
+3. Rewrites the `project` field in `~/.claude/history.jsonl`.
+4. Remaps the project's entry in `~/.claude.json` (the `projects` map keyed by absolute path, plus `githubRepoPaths`).
+   This is the per-project config: allowed tools, MCP servers, trust acceptance, and stats.
+   Both community shell scripts miss this, so a rename silently drops those settings.
+5. Defensively renames any `<encoded-old>` entry under the sibling dirs `todos/`, `file-history/`, `shell-snapshots/`, and `debug/`.
+   On current Claude Code these are keyed by session id, not project path, so there is usually nothing to move.
+   Some versions key them by path, and this keeps the tool correct for them.
 
 By default it does not move your actual project directory.
 Pass `--move-dir` if you want it to.
@@ -86,4 +90,7 @@ This is a from-scratch reimplementation of the shell `claude-mv` scripts, writte
 
 ## Scope note
 
-Other directories under `~/.claude` (`todos/`, `file-history/`, `session-env/`, `shell-snapshots/`, `debug/`) are keyed by session id or content hash, not by the project path, so a rename does not affect them and they are intentionally left alone.
+On current Claude Code, `todos/`, `file-history/`, `session-env/`, `shell-snapshots/`, and `debug/` are keyed by session id or content hash, not by the project path.
+A project rename does not change those keys, so their contents are left alone.
+The path can still appear inside them (a debug log line, a snapshot of a file that mentions its own path), but that is historical content, not a location pointer, so rewriting it would be wrong.
+The one exception is a `<encoded>` directory keyed by the project path, which this tool does move (see item 5 above).

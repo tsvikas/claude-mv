@@ -33,6 +33,14 @@ from typing import Annotated, Literal
 from cyclopts import App, Parameter
 
 DEFAULT_CLAUDE_DIR = Path.home() / ".claude"
+DEFAULT_CLAUDE_JSON = Path.home() / ".claude.json"
+
+# Directories under ~/.claude that are (or on some versions were) keyed by the encoded
+# project path. On current Claude Code only `projects` is path-keyed and carries the
+# session files; the rest are keyed by session id or content hash, so their `<encoded>`
+# entry simply won't exist and is skipped. Renaming them anyway keeps the tool correct
+# across versions that do key them by path (see the reference scripts).
+PATH_KEYED_DIRS = ("projects", "todos", "file-history", "shell-snapshots", "debug")
 
 app = App(
     name="claude-mv",
@@ -176,6 +184,59 @@ def _rewrite_field(path: Path, field: str, old: str, new: str, *, apply: bool) -
     return changed
 
 
+def _remap_json(obj: object, old: str, new: str) -> tuple[object, int]:
+    """Recursively remap every dict key and string value that holds the old path.
+
+    Returns (new_object, number_of_remaps). Used for `~/.claude.json`, whose every
+    project-path occurrence is a location pointer (a `projects` key, a `githubRepoPaths`
+    entry), never incidental prose, so a structural remap is both safe and complete.
+    """
+    if isinstance(obj, str):
+        remapped = remap(obj, old, new)
+        return (remapped, 1) if remapped is not None else (obj, 0)
+    if isinstance(obj, dict):
+        out: dict[object, object] = {}
+        count = 0
+        for key, value in obj.items():
+            new_key = remap(key, old, new) if isinstance(key, str) else None
+            if new_key is not None:
+                key = new_key
+                count += 1
+            new_value, sub = _remap_json(value, old, new)
+            count += sub
+            out[key] = new_value
+        return out, count
+    if isinstance(obj, list):
+        out_list: list[object] = []
+        count = 0
+        for value in obj:
+            new_value, sub = _remap_json(value, old, new)
+            count += sub
+            out_list.append(new_value)
+        return out_list, count
+    return obj, 0
+
+
+def _rewrite_claude_json(path: Path, old: str, new: str, *, apply: bool) -> int:
+    """Remap project-path keys and values in `~/.claude.json` (per-project config).
+
+    This holds `allowedTools`, MCP servers, trust acceptance, and stats keyed by the
+    project's absolute path, so a rename orphans it unless remapped. Returns the number
+    of remaps. Only the matching keys/values change; the file's 2-space formatting is
+    preserved so the diff stays minimal.
+    """
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    new_data, count = _remap_json(data, old, new)
+    if apply and count:
+        _atomic_write(path, [json.dumps(new_data, ensure_ascii=False, indent=2) + "\n"])
+    return count
+
+
 def _merge_move(src: Path, dst: Path, warnings: list[str]) -> None:
     """Move everything from `src` into `dst`, recursing into shared subdirectories.
 
@@ -200,36 +261,36 @@ def _merge_move(src: Path, dst: Path, warnings: list[str]) -> None:
             shutil.move(str(item), str(target))
 
 
-def _backup(items: list[Path], enc_old: str, claude_dir: Path) -> Path:
-    """Copy each existing item into a fresh timestamped backup dir; return that dir."""
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    root = claude_dir / "claude-mv-backups" / f"{stamp}-{enc_old}"
-    root.mkdir(parents=True, exist_ok=True)
-    for item in items:
+def _backup(items: list[Path], backup_root: Path) -> list[tuple[Path, Path]]:
+    """Copy each existing item into `backup_root`; return (original, saved) pairs.
+
+    Items are saved under an index-prefixed name so that same-named sources (every
+    `<encoded>` dir across `projects/`, `todos/`, ... shares a name) never collide.
+    """
+    backup_root.mkdir(parents=True, exist_ok=True)
+    pairs: list[tuple[Path, Path]] = []
+    for i, item in enumerate(items):
         if not item.exists():
             continue
-        dest = root / item.name
+        saved = backup_root / f"{i:02d}-{item.name}"
         if item.is_dir():
-            shutil.copytree(item, dest)
+            shutil.copytree(item, saved)
         else:
-            shutil.copy2(item, dest)
-    return root
+            shutil.copy2(item, saved)
+        pairs.append((item, saved))
+    return pairs
 
 
-def _restore(backup_root: Path, items: list[Path]) -> None:
-    """Restore each item from `backup_root`, replacing whatever is there now."""
-    for item in items:
-        saved = backup_root / item.name
-        if not saved.exists():
-            continue
-        if item.is_dir():
-            shutil.rmtree(item, ignore_errors=True)
-        elif item.exists():
-            item.unlink()
-        if saved.is_dir():
-            shutil.copytree(saved, item)
-        else:
-            shutil.copy2(saved, item)
+def _restore_pair(original: Path, saved: Path) -> None:
+    """Replace whatever is now at `original` with the backed-up copy `saved`."""
+    if original.is_dir():
+        shutil.rmtree(original, ignore_errors=True)
+    elif original.exists():
+        original.unlink()
+    if saved.is_dir():
+        shutil.copytree(saved, original)
+    else:
+        shutil.copy2(saved, original)
 
 
 def _confirm(prompt: str) -> bool:
@@ -252,6 +313,7 @@ def main(
     yes: Annotated[bool, Parameter(alias="-y")] = False,
     force: bool = False,
     claude_dir: Path = DEFAULT_CLAUDE_DIR,
+    claude_json: Path = DEFAULT_CLAUDE_JSON,
 ) -> int:
     """Repoint Claude Code's bookkeeping from an old project path to a new one.
 
@@ -277,6 +339,9 @@ def main(
         Override the safety check that the destination history belongs to this project.
     claude_dir
         Location of the Claude data directory (default: `~/.claude`). For testing.
+    claude_json
+        Location of Claude's per-project config file (default: `~/.claude.json`).
+        For testing.
     """
     old_abs = to_abs(old)
     new_abs = to_abs(new)
@@ -308,6 +373,16 @@ def main(
     hist_hits = _rewrite_field(
         history_file, "project", old_stored, new_abs, apply=False
     )
+    cjson_hits = _rewrite_claude_json(claude_json, old_stored, new_abs, apply=False)
+
+    # Sibling dirs that some Claude Code versions key by the encoded path. Present only
+    # if such a version created them; on current versions they are session-keyed, so the
+    # `<encoded>` entry does not exist and the list is empty.
+    extra_moves = [
+        (name, claude_dir / name / enc_old, claude_dir / name / enc_new)
+        for name in PATH_KEYED_DIRS
+        if name != "projects" and (claude_dir / name / enc_old).exists()
+    ]
 
     print("claude-mv plan")
     print(f"  old path : {old_stored}")
@@ -319,11 +394,14 @@ def main(
         print(
             f"  sessions : {n_sessions} file(s), {cwd_hits} cwd reference(s) to rewrite"
         )
+    for name, _src, _dst in extra_moves:
+        print(f"  {name}/: {enc_old}  ->  {enc_new}")
     print(f"  history  : {hist_hits} line(s) to rewrite in history.jsonl")
+    print(f"  config   : {cjson_hits} entry(ies) to remap in .claude.json")
     if move_dir:
         print(f"  move dir : {old_abs}  ->  {new_abs}  (real directory)")
 
-    if src_dir is None and hist_hits == 0:
+    if src_dir is None and hist_hits == 0 and cjson_hits == 0 and not extra_moves:
         print("Nothing to do.")
         return 0
 
@@ -364,12 +442,24 @@ def main(
             print("Aborted.")
             return 1
 
-    backup_items = [
-        p for p in (src_dir, dst_dir if conflict else None, history_file) if p
-    ]
-    backup_root = _backup(backup_items, enc_old, claude_dir)
+    # Back up everything we may modify or delete: the source dirs, any merge
+    # destinations (restored wholesale on failure), history, and the config file.
+    backup_items: list[Path] = [src_dir] if src_dir else []
+    if conflict:
+        backup_items.append(dst_dir)
+    backup_items += [s for _n, s, _d in extra_moves]
+    backup_items += [d for _n, _s, d in extra_moves if d.exists()]
+    backup_items.append(history_file)
+    if cjson_hits:
+        backup_items.append(claude_json)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_root = claude_dir / "claude-mv-backups" / f"{stamp}-{enc_old}"
+    backup_pairs = _backup(backup_items, backup_root)
     print(f"  backup   : {backup_root}")
 
+    warnings: list[str] = []
+    created: list[Path] = []  # paths a rename created; delete these on rollback
     moved_real = False
     try:
         if move_dir:
@@ -385,7 +475,6 @@ def main(
             shutil.move(old_abs, new_abs)
             moved_real = True
 
-        warnings: list[str] = []
         if src_dir is not None:
             if conflict and on_conflict == "clean":
                 shutil.rmtree(dst_dir)
@@ -395,16 +484,35 @@ def main(
                 src_dir.rmdir()
             else:
                 src_dir.rename(dst_dir)
+                created.append(dst_dir)
 
             for jsonl in dst_dir.glob("*.jsonl"):
                 _rewrite_field(jsonl, "cwd", old_stored, new_abs, apply=True)
 
+        for _name, src, dst in extra_moves:
+            if dst.exists():
+                _merge_move(src, dst, warnings)
+                if src.is_dir():
+                    src.rmdir()
+            else:
+                src.rename(dst)
+                created.append(dst)
+
         _rewrite_field(history_file, "project", old_stored, new_abs, apply=True)
+        _rewrite_claude_json(claude_json, old_stored, new_abs, apply=True)
     except BaseException as exc:
         print(f"Error: {exc}\nRolling back...", file=sys.stderr)
         if moved_real and Path(new_abs).exists() and not Path(old_abs).exists():
             shutil.move(new_abs, old_abs)
-        _restore(backup_root, backup_items)
+        for path in reversed(created):
+            if not path.exists():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        for original, saved in backup_pairs:
+            _restore_pair(original, saved)
         print("Rolled back to the pre-move state.", file=sys.stderr)
         raise
 
