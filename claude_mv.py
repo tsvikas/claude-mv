@@ -216,10 +216,11 @@ def _rewrite_field(path: Path, field: str, old: str, new: str, *, apply: bool) -
 def _replace_paths_in_text(text: str, old: str, new: str) -> str:
     """Literal, path-boundary-aware replacement of `old` with `new` inside free text.
 
-    An occurrence is replaced only when the character right after it cannot continue a
-    filename (a separator, a quote, whitespace, punctuation, or end of string). So the
-    `old` path inside a longer sibling like `/proj-2` (next char `-`) is left alone,
-    while `/proj` in `cd /proj && ls`, `"/proj/sub"`, or at end of line is replaced.
+    An occurrence is replaced only when both the character before and the character
+    after it are outside a filename (a separator, quote, whitespace, punctuation, or a
+    string edge). So `/proj` is replaced in `cd /proj && ls` and `"/proj/sub"`, but left
+    alone in a longer sibling `/proj-2` (trailing `-`) or a different path that merely
+    ends with it, `/mnt/backup/proj` (leading `p`).
     """
     if old not in text:
         return text
@@ -232,8 +233,12 @@ def _replace_paths_in_text(text: str, old: str, new: str) -> str:
             out.append(text[i:])
             break
         out.append(text[i:j])
+        before = text[j - 1] if j > 0 else ""
         after = text[j + n] if j + n < len(text) else ""
-        out.append(new if not (after.isalnum() or after in "._-") else old)
+        on_boundary = not (before.isalnum() or before in "._-") and not (
+            after.isalnum() or after in "._-"
+        )
+        out.append(new if on_boundary else old)
         i = j + n
     return "".join(out)
 
@@ -488,6 +493,11 @@ def main(
     if old_abs == new_abs:
         print("Old and new paths resolve to the same location; nothing to do.")
         return 1
+    # Nested paths break the prefix remap: the result stays under `old`, so the rewrite
+    # is neither reversible nor idempotent (a re-run would append again). Refuse.
+    if _under(new_abs, old_abs) or _under(old_abs, new_abs):
+        print("Refusing: the old and new paths overlap (one is inside the other).")
+        return 1
 
     projects_dir = claude_dir / "projects"
     history_file = claude_dir / "history.jsonl"
@@ -496,15 +506,16 @@ def main(
     enc_new = encode_path(new_abs)
     dst_dir = projects_dir / enc_new
 
-    # Resumability: if the default migration already ran, the project now lives at
-    # `enc_new` and `enc_old` is gone. Detect that so a re-run (say, to add
-    # --rewrite-content or --move-dir) resumes with the remaining work instead of
-    # finding nothing. Only trust `enc_new` as *this* project if its root cwd resolves
-    # to the new path, not an unrelated project that merely encodes the same.
+    # Resumability: if a prior run already moved the dir to `enc_new` and `enc_old` is
+    # gone, recognize it so a re-run resumes the remaining work instead of finding
+    # nothing. Evidence-based: treat `enc_new` as this project if its sessions reference
+    # either endpoint. That covers a clean migration (cwd already new) and a half-done
+    # one (cwd still old), while leaving an unrelated project (cwd under a third path)
+    # alone, since every rewrite below is old->new and no-ops on it.
     migrated = False
     if src_dir is None and dst_dir.is_dir():
-        dst_cwd = read_root_cwd(dst_dir, enc_new)
-        if dst_cwd and to_abs(dst_cwd) == new_abs:
+        has_old, has_new = cwd_targets(dst_dir, old_abs, new_abs)
+        if has_old or has_new:
             src_dir = dst_dir
             migrated = True
 

@@ -225,6 +225,46 @@ def test_claude_json_remap(tmp_path):
     assert got["githubRepoPaths"]["me/proj"] == [NEW, OLD + "-2"]
 
 
+def test_resume_stale_cwd_dir(tmp_path):
+    # dir already renamed to enc_new but its cwd is still old (interrupted/half-done);
+    # the tool should recognize it and finish, not report "nothing found" + a false Done
+    cd, cj = build(tmp_path, sessions={E_NEW: [{"cwd": OLD}]})
+    code, out = run(cd, cj, OLD, NEW)
+    assert code == 0
+    assert cwds(cd, E_NEW) == [NEW]
+
+
+def test_unrelated_project_at_enc_new_untouched(tmp_path):
+    # a different real project happens to live at enc_new; leave it byte-for-byte alone
+    third = "/Users/me/somethingelse"
+    cd, cj = build(tmp_path, sessions={E_NEW: [{"cwd": third}]})
+    before = (cd / "projects" / E_NEW / f"{E_NEW}.jsonl").read_bytes()
+    code, out = run(cd, cj, OLD, NEW)
+    assert code == 0
+    assert "Nothing to do." in out
+    assert (cd / "projects" / E_NEW / f"{E_NEW}.jsonl").read_bytes() == before
+
+
+def test_content_mode_leading_boundary(tmp_path):
+    # a different path that merely ends with OLD must not be rewritten in content mode
+    rec = {"cwd": OLD, "x": f"cp /mnt/backup{OLD}/f ./f"}
+    cd, cj = build(tmp_path, sessions={E_OLD: [rec]})
+    run(cd, cj, OLD, NEW, rewrite_content=True)
+    obj = one_session(cd, E_NEW)
+    assert obj["cwd"] == NEW
+    assert obj["x"] == f"cp /mnt/backup{OLD}/f ./f"  # backup path left intact
+
+
+def test_nested_paths_refused(tmp_path):
+    cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]})
+    code, out = run(cd, cj, OLD, OLD + "/app")  # new under old
+    assert code == 1
+    assert "inside the other" in out
+    assert cwds(cd, E_OLD) == [OLD]  # untouched
+    code, out = run(cd, cj, OLD + "/app", OLD)  # old under new
+    assert code == 1
+
+
 def test_claude_json_collision_refused(tmp_path):
     # both old and new already have a (differing) config entry -> refuse, change nothing
     cjson = {
