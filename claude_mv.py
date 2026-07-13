@@ -130,6 +130,26 @@ def find_project_dir(projects_dir: Path, old_abs: str) -> tuple[Path | None, str
     return None, enc
 
 
+def sub_projects_under(projects_dir: Path, old: str, src_dir: Path | None) -> list[str]:
+    """Root paths of *other* projects that sit strictly under `old`.
+
+    If `/a` is being moved and `/a/c` is its own Claude project (a separate `projects/`
+    dir, e.g. a worktree), moving `/a` alone would leave `/a/c` half-migrated. The
+    caller refuses when this returns anything, so those are moved deliberately instead.
+    """
+    found: list[str] = []
+    if projects_dir.is_dir():
+        for sub in sorted(projects_dir.iterdir()):
+            if sub == src_dir or not sub.is_dir():
+                continue
+            cwd = read_root_cwd(sub, sub.name)
+            if cwd:
+                root = to_abs(cwd)
+                if root != old and _under(root, old):
+                    found.append(root)
+    return found
+
+
 def _under(path: str, base: str) -> bool:
     """True if `path` is `base` or a descendant of it, on a real separator boundary.
 
@@ -463,6 +483,8 @@ class Plan:
     new_exists: bool
     mixed: bool  # sessions reference both old and new (partial migration)
     cjson_collisions: list[str]
+    sub_projects: list[str]  # separate projects nested under old (moving would half-do)
+    content_warn: bool  # --rewrite-content where new extends old across a boundary char
     conflict: bool  # a *different* project already sits at enc_new
     conflict_cwd: str | None
     conflict_related: bool
@@ -573,6 +595,13 @@ def resolve_plan(
     has_old_cwd, has_new_cwd = (
         cwd_targets(src_dir, old_stored, new_abs) if src_dir else (False, False)
     )
+    sub_projects = sub_projects_under(projects_dir, old_stored, src_dir)
+    # --rewrite-content isn't idempotent when the new path extends the old across a
+    # boundary char (space, @, +, ...); flag it so the user can check the result.
+    tail = new_abs[len(old_stored) :] if new_abs.startswith(old_stored) else ""
+    content_warn = bool(
+        rewrite_content and tail and not (tail[0].isalnum() or tail[0] in "._-")
+    )
 
     # A *different* project already sitting at enc_new. The encoding is lossy, so trust
     # it as this project's history only if its recorded cwd resolves to old or new.
@@ -603,6 +632,8 @@ def resolve_plan(
         new_exists=new_exists,
         mixed=has_old_cwd and has_new_cwd,
         cjson_collisions=claude_json_collisions(claude_json, old_stored, new_abs),
+        sub_projects=sub_projects,
+        content_warn=content_warn,
         conflict=conflict,
         conflict_cwd=conflict_cwd,
         conflict_related=conflict_related,
@@ -641,6 +672,11 @@ def print_plan(plan: Plan) -> None:
         )
     if plan.mixed:
         print("  WARNING  : sessions mix old and new cwd (partial migration)")
+    if plan.content_warn:
+        print(
+            "  WARNING  : --rewrite-content and the new path extends the old across a"
+            " space/@/+; re-running would double-apply. Check the result, don't re-run."
+        )
 
 
 def check_refusals(
@@ -658,6 +694,19 @@ def check_refusals(
             else "neither the old nor the new directory exists"
         )
         print(f"Refusing --move-dir: {where}; resolve it by hand first.")
+        return 2
+
+    if plan.sub_projects:
+        shown = ", ".join(plan.sub_projects[:3])
+        if len(plan.sub_projects) > 3:
+            shown += f", (+{len(plan.sub_projects) - 3} more)"
+        example = plan.sub_projects[0]
+        target = remap(example, plan.old_stored, plan.new_abs)
+        print(
+            f"Refusing: {len(plan.sub_projects)} separate project(s) live under"
+            f" {plan.old_stored}: {shown}."
+            f" Move each first, e.g. claude-mv {example} {target}"
+        )
         return 2
 
     if plan.mixed and not heal:

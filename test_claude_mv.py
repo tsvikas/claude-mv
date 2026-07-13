@@ -257,6 +257,42 @@ def test_content_mode_leading_boundary(tmp_path):
     assert obj["x"] == f"cp /mnt/backup{OLD}/f ./f"  # backup path left intact
 
 
+def test_sub_project_refused(tmp_path):
+    # /a is moving; /a/c is its own project -> refuse, change nothing
+    cd, cj = build(
+        tmp_path,
+        sessions={enc("/a"): [{"cwd": "/a"}], enc("/a/c"): [{"cwd": "/a/c"}]},
+        history=[{"project": "/a"}, {"project": "/a/c"}],
+    )
+    code, out = run(cd, cj, "/a", "/b")
+    assert code == 2
+    assert "separate project" in out
+    assert (cd / "projects" / enc("/a")).exists()  # untouched
+    projects = [
+        json.loads(x)["project"]
+        for x in (cd / "history.jsonl").read_text().splitlines()
+    ]
+    assert projects == ["/a", "/a/c"]  # no cascade happened
+
+
+def test_own_subdir_cwd_is_not_a_sub_project(tmp_path):
+    # a session in /a whose cwd is a subdir (e.g. a worktree in the same project) is
+    # not a separate project, so the move proceeds and rewrites it
+    cd, cj = build(tmp_path, sessions={enc("/a"): [{"cwd": "/a"}, {"cwd": "/a/wt"}]})
+    code, out = run(cd, cj, "/a", "/b")
+    assert code == 0
+    assert set(cwds(cd, enc("/b"))) == {"/b", "/b/wt"}
+
+
+def test_content_warn_non_idempotent(tmp_path):
+    old, new = "/a/proj", "/a/proj v2"  # new extends old across a space
+    cd, cj = build(tmp_path, sessions={enc(old): [{"cwd": old}]})
+    code, out = run(cd, cj, old, new, rewrite_content=True)
+    assert code == 0
+    assert "WARNING" in out and "double-apply" in out
+    assert cwds(cd, enc(new)) == [new]
+
+
 def test_nested_paths_refused(tmp_path):
     cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]})
     code, out = run(cd, cj, OLD, OLD + "/app")  # new under old
