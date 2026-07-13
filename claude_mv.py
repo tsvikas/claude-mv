@@ -122,16 +122,45 @@ def find_project_dir(projects_dir: Path, old_abs: str) -> tuple[Path | None, str
     return None, enc
 
 
-def remap(value: str, old: str, new: str) -> str | None:
-    """Return `value` with an `old` path prefix swapped for `new`, or None if unchanged.
+def _under(path: str, base: str) -> bool:
+    """True if `path` is `base` or a descendant of it, on a real separator boundary.
 
-    The `old + os.sep` boundary check keeps `/proj` from matching `/proj-2`.
+    The boundary check keeps `/proj` from being considered under `/proj-2`.
     """
-    if value == old:
-        return new
-    if value.startswith(old + os.sep):
-        return new + value[len(old) :]
-    return None
+    return path == base or path.startswith(base + os.sep)
+
+
+def remap(value: str, old: str, new: str) -> str | None:
+    """Return `value` with its `old` path prefix swapped for `new`, else None."""
+    return new + value[len(old) :] if _under(value, old) else None
+
+
+def cwd_targets(project_dir: Path, old: str, new: str) -> tuple[bool, bool]:
+    """Whether any recorded session `cwd` points under `old` and/or under `new`.
+
+    A cleanly-placed project points entirely at one of them. A mix of both means a
+    partial migration, which the caller refuses unless explicitly told to finish it.
+    """
+    has_old = has_new = False
+    for jsonl in project_dir.glob("*.jsonl"):
+        try:
+            with jsonl.open(encoding="utf-8") as fh:
+                for line in fh:
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        cwd = json.loads(line).get("cwd")
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(cwd, str):
+                        continue
+                    has_old = has_old or _under(cwd, old)
+                    has_new = has_new or _under(cwd, new)
+        except OSError:
+            continue
+        if has_old and has_new:
+            break
+    return has_old, has_new
 
 
 def _atomic_write(path: Path, lines: list[str]) -> None:
@@ -376,6 +405,7 @@ def main(
     on_conflict: Literal["abort", "merge", "clean"] = "abort",
     move_dir: bool = False,
     rewrite_content: bool = False,
+    heal: bool = False,
     dry_run: Annotated[bool, Parameter(alias="-n")] = False,
     yes: Annotated[bool, Parameter(alias="-y")] = False,
     force: bool = False,
@@ -402,6 +432,10 @@ def main(
         Also replace incidental path mentions inside session files and history.jsonl
         (logged shell commands, captured output), not just the `cwd`/`project` pointer
         fields. Off by default, since that text is a record of what actually happened.
+    heal
+        Proceed even when the project is in a partial-migration state (its sessions mix
+        old and new `cwd` references), finishing the move. Without it such a state is
+        refused rather than guessed at.
     dry_run
         Show what would change and touch nothing.
     yes
@@ -479,6 +513,11 @@ def main(
     move_bad = move_dir and not (move_pending or move_done)
     dir_move_pending = src_dir is not None and not migrated
 
+    has_old_cwd, has_new_cwd = (
+        cwd_targets(src_dir, old_stored, new_abs) if src_dir else (False, False)
+    )
+    mixed = has_old_cwd and has_new_cwd
+
     print("claude-mv plan")
     print(f"  old path : {old_stored}")
     print(f"  new path : {new_abs}")
@@ -502,6 +541,8 @@ def main(
     elif move_bad:
         where = "both exist" if old_exists else "neither exists"
         print(f"  move dir : cannot ({where})")
+    if mixed:
+        print("  WARNING  : sessions mix old and new cwd (partial migration)")
 
     # Verify: --move-dir needs the real dir cleanly at exactly one of old/new.
     if move_bad:
@@ -511,6 +552,14 @@ def main(
             else "neither the old nor the new directory exists"
         )
         print(f"Refusing --move-dir: {where}; resolve it by hand first.")
+        return 2
+
+    # Verify: refuse an ambiguous partial migration rather than guessing at it.
+    if mixed and not heal:
+        print(
+            "Refusing: this project's sessions mix old and new cwd references, which"
+            " looks like a partial migration. Re-run with --heal to finish it."
+        )
         return 2
 
     any_work = bool(

@@ -74,8 +74,10 @@ uv run claude_mv.py ~/code/old ~/code/new --move-dir        # now also move the 
 ```
 
 Each of these steps is idempotent: once its work is done, re-running it just prints "Already migrated; nothing to do".
-The state is also verified.
-If `--move-dir` is asked for but the real directory is in an in-between state (both the old and new paths exist, or neither does), the tool refuses rather than guess.
+
+The state is verified rather than guessed at.
+If the project's sessions mix old and new `cwd` references (a half-finished migration), the tool refuses and asks you to re-run with `--heal` to finish it.
+If `--move-dir` is asked for but the real directory is in an in-between state (both the old and new paths exist, or neither does), it refuses too.
 
 ## Why it is careful where the reference scripts are not
 
