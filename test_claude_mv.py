@@ -225,6 +225,31 @@ def test_claude_json_remap(tmp_path):
     assert got["githubRepoPaths"]["me/proj"] == [NEW, OLD + "-2"]
 
 
+def test_claude_json_collision_refused(tmp_path):
+    # both old and new already have a (differing) config entry -> refuse, change nothing
+    cjson = {
+        "projects": {OLD: {"allowedTools": ["Bash"]}, NEW: {"allowedTools": ["Read"]}}
+    }
+    cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]}, cjson=cjson)
+    code, out = run(cd, cj, OLD, NEW)
+    assert code == 2
+    assert ".claude.json" in out
+    got = json.loads(cj.read_text())
+    assert got["projects"][OLD] == {"allowedTools": ["Bash"]}  # nothing dropped
+    assert got["projects"][NEW] == {"allowedTools": ["Read"]}
+    assert (cd / "projects" / E_OLD).exists()  # projects dir untouched too
+
+
+def test_claude_json_collision_identical_ok(tmp_path):
+    # identical entries: no information is lost, so proceed
+    cfg = {"allowedTools": ["Bash"]}
+    cjson = {"projects": {OLD: cfg, NEW: dict(cfg)}}
+    cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]}, cjson=cjson)
+    code, out = run(cd, cj, OLD, NEW)
+    assert code == 0
+    assert set(json.loads(cj.read_text())["projects"]) == {NEW}
+
+
 def test_mixed_refused_then_heal(tmp_path):
     # dir already at enc_new, one stray old cwd -> genuine (non-nested) partial state
     cd, cj = build(tmp_path)

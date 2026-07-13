@@ -332,6 +332,41 @@ def _rewrite_claude_json(path: Path, old: str, new: str, *, apply: bool) -> int:
     return count
 
 
+def claude_json_collisions(path: Path, old: str, new: str) -> list[str]:
+    """Keys in `~/.claude.json` that remapping `old`->`new` would collide onto.
+
+    A collision means both the old and the new path already have a distinct entry (e.g.
+    the user opened Claude at the new path before running this), so remapping would
+    overwrite one with the other. Returns the colliding target keys; empty if the remap
+    is lossless. Identical values don't count (nothing is lost). The caller refuses
+    rather than pick a winner.
+    """
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    found: list[str] = []
+
+    def walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            targets: dict[str, object] = {}
+            for key, value in obj.items():
+                target = (remap(key, old, new) or key) if isinstance(key, str) else key
+                if target in targets and targets[target] != value:
+                    found.append(target)
+                else:
+                    targets[target] = value
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(data)
+    return found
+
+
 def _merge_move(src: Path, dst: Path, warnings: list[str]) -> None:
     """Move everything from `src` into `dst`, recursing into shared subdirectories.
 
@@ -517,6 +552,7 @@ def main(
         cwd_targets(src_dir, old_stored, new_abs) if src_dir else (False, False)
     )
     mixed = has_old_cwd and has_new_cwd
+    cjson_collisions = claude_json_collisions(claude_json, old_stored, new_abs)
 
     print("claude-mv plan")
     print(f"  old path : {old_stored}")
@@ -559,6 +595,16 @@ def main(
         print(
             "Refusing: this project's sessions mix old and new cwd references, which"
             " looks like a partial migration. Re-run with --heal to finish it."
+        )
+        return 2
+
+    # Verify: refuse rather than overwrite an existing .claude.json entry for the new
+    # path with the old one (or vice versa); the user must remove the stray entry.
+    if cjson_collisions:
+        joined = ", ".join(cjson_collisions)
+        print(
+            f"Refusing: .claude.json already has an entry for {joined} that differs"
+            " from the one being migrated. Remove one by hand, then re-run."
         )
         return 2
 
