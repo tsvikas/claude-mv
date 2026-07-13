@@ -39,6 +39,7 @@ The old directory does not need to still exist, since the tool works from Claude
 | --- | --- |
 | `--dry-run`, `-n` | Show the plan and touch nothing. |
 | `--move-dir` | Also move the real project directory, not just `~/.claude`. |
+| `--rewrite-content` | Also rewrite incidental path mentions inside session and history files, not just the pointer fields (see below). |
 | `--on-conflict abort\|merge\|clean` | What to do if the destination already has history (default `abort`). |
 | `--yes`, `-y` | Skip the confirmation prompt. Required in a non-interactive shell. |
 | `--force` | Override the destination-identity safety check (see below). |
@@ -64,9 +65,10 @@ Pass `--move-dir` if you want it to.
 This is a from-scratch reimplementation of the shell `claude-mv` scripts, written to avoid their data-loss modes.
 
 - **JSON-aware, field-scoped rewrites.**
-  It parses each line and edits only the semantic path field (`cwd` in sessions, `project` in history).
+  By default it parses each line and edits only the location-pointer fields: `cwd` in sessions, `project` in history, and the `projects`/`githubRepoPaths` entries in `~/.claude.json`.
   It never does a blind text substitution, so an old path that appears incidentally inside a logged shell command or captured tool output is left untouched.
   Rewriting that incidental text would corrupt the historical record and can silently mangle unrelated data.
+  If you do want the incidental mentions rewritten too, `--rewrite-content` opts in, and even then the replacement is path-boundary-aware so `/proj` inside `/proj-2` is still safe.
 
 - **Correct, verified encoding.**
   The encoding replaces every non-alphanumeric character, not just `/` and `.`.

@@ -184,6 +184,72 @@ def _rewrite_field(path: Path, field: str, old: str, new: str, *, apply: bool) -
     return changed
 
 
+def _replace_paths_in_text(text: str, old: str, new: str) -> str:
+    """Literal, path-boundary-aware replacement of `old` with `new` inside free text.
+
+    An occurrence is replaced only when the character right after it cannot continue a
+    filename (a separator, a quote, whitespace, punctuation, or end of string). So the
+    `old` path inside a longer sibling like `/proj-2` (next char `-`) is left alone,
+    while `/proj` in `cd /proj && ls`, `"/proj/sub"`, or at end of line is replaced.
+    """
+    if old not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    n = len(old)
+    while True:
+        j = text.find(old, i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        after = text[j + n] if j + n < len(text) else ""
+        out.append(new if not (after.isalnum() or after in "._-") else old)
+        i = j + n
+    return "".join(out)
+
+
+def _rewrite_content(path: Path, old: str, new: str, *, apply: bool) -> int:
+    """Replace every path mention of `old` with `new` in a file's raw text.
+
+    The opt-in counterpart to the field-scoped rewrite: this also changes incidental
+    mentions in logged commands and captured output. Returns the number of lines that
+    changed. Paths carry no JSON-special characters, so raw-text replacement keeps the
+    JSONL valid.
+    """
+    if not path.exists():
+        return 0
+    changed = 0
+    out: list[str] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            new_line = _replace_paths_in_text(line, old, new)
+            if new_line != line:
+                changed += 1
+            out.append(new_line)
+    if apply and changed:
+        _atomic_write(path, out)
+    return changed
+
+
+def rewrite_session(
+    path: Path, old: str, new: str, *, content: bool, apply: bool
+) -> int:
+    """Rewrite a session file: all path mentions if `content`, else just `cwd`."""
+    if content:
+        return _rewrite_content(path, old, new, apply=apply)
+    return _rewrite_field(path, "cwd", old, new, apply=apply)
+
+
+def rewrite_history(
+    path: Path, old: str, new: str, *, content: bool, apply: bool
+) -> int:
+    """Rewrite history.jsonl: all path mentions if `content`, else just `project`."""
+    if content:
+        return _rewrite_content(path, old, new, apply=apply)
+    return _rewrite_field(path, "project", old, new, apply=apply)
+
+
 def _remap_json(obj: object, old: str, new: str) -> tuple[object, int]:
     """Recursively remap every dict key and string value that holds the old path.
 
@@ -309,6 +375,7 @@ def main(
     *,
     on_conflict: Literal["abort", "merge", "clean"] = "abort",
     move_dir: bool = False,
+    rewrite_content: bool = False,
     dry_run: Annotated[bool, Parameter(alias="-n")] = False,
     yes: Annotated[bool, Parameter(alias="-y")] = False,
     force: bool = False,
@@ -331,6 +398,10 @@ def main(
     move_dir
         Also move the real project directory from `old` to `new` (default: leave the
         filesystem alone and only fix `~/.claude`).
+    rewrite_content
+        Also replace incidental path mentions inside session files and history.jsonl
+        (logged shell commands, captured output), not just the `cwd`/`project` pointer
+        fields. Off by default, since that text is a record of what actually happened.
     dry_run
         Show what would change and touch nothing.
     yes
@@ -362,16 +433,18 @@ def main(
     old_stored = (read_root_cwd(src_dir, enc_old) if src_dir else None) or old_abs
 
     n_sessions = len(list(src_dir.glob("*.jsonl"))) if src_dir else 0
-    cwd_hits = (
+    sess_hits = (
         sum(
-            _rewrite_field(f, "cwd", old_stored, new_abs, apply=False)
+            rewrite_session(
+                f, old_stored, new_abs, content=rewrite_content, apply=False
+            )
             for f in src_dir.glob("*.jsonl")
         )
         if src_dir
         else 0
     )
-    hist_hits = _rewrite_field(
-        history_file, "project", old_stored, new_abs, apply=False
+    hist_hits = rewrite_history(
+        history_file, old_stored, new_abs, content=rewrite_content, apply=False
     )
     cjson_hits = _rewrite_claude_json(claude_json, old_stored, new_abs, apply=False)
 
@@ -391,9 +464,8 @@ def main(
     if src_dir is None:
         print("  (no projects/ directory found for the old path)")
     else:
-        print(
-            f"  sessions : {n_sessions} file(s), {cwd_hits} cwd reference(s) to rewrite"
-        )
+        unit = "path mention(s)" if rewrite_content else "cwd reference(s)"
+        print(f"  sessions : {n_sessions} file(s), {sess_hits} {unit} to rewrite")
     for name, _src, _dst in extra_moves:
         print(f"  {name}/: {enc_old}  ->  {enc_new}")
     print(f"  history  : {hist_hits} line(s) to rewrite in history.jsonl")
@@ -487,7 +559,9 @@ def main(
                 created.append(dst_dir)
 
             for jsonl in dst_dir.glob("*.jsonl"):
-                _rewrite_field(jsonl, "cwd", old_stored, new_abs, apply=True)
+                rewrite_session(
+                    jsonl, old_stored, new_abs, content=rewrite_content, apply=True
+                )
 
         for _name, src, dst in extra_moves:
             if dst.exists():
@@ -498,7 +572,9 @@ def main(
                 src.rename(dst)
                 created.append(dst)
 
-        _rewrite_field(history_file, "project", old_stored, new_abs, apply=True)
+        rewrite_history(
+            history_file, old_stored, new_abs, content=rewrite_content, apply=True
+        )
         _rewrite_claude_json(claude_json, old_stored, new_abs, apply=True)
     except BaseException as exc:
         print(f"Error: {exc}\nRolling back...", file=sys.stderr)
