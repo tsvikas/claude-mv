@@ -226,6 +226,14 @@ def _replace_paths_in_text(text: str, old: str, new: str) -> str:
     string edge). So `/proj` is replaced in `cd /proj && ls` and `"/proj/sub"`, but left
     alone in a longer sibling `/proj-2` (trailing `-`) or a different path that merely
     ends with it, `/mnt/backup/proj` (leading `p`).
+
+    Best-effort, and only behind --rewrite-content: raw text can't disambiguate every
+    case, so there are two known edges. (1) It is not idempotent when the new path
+    extends the old across a boundary char, e.g. `/proj` -> `/proj v2`: re-running turns
+    `/proj v2` into `/proj v2 v2`. (2) A sibling whose boundary char isn't `-`, `_`, or
+    `.` (say `/proj@bak`) is treated as a distinct path and rewritten. Only the `-` `_`
+    `.` and `/` renames are handled cleanly. The default pointer rewrites avoid all of
+    this by matching whole field values via `_under`, so a normal run never touches it.
     """
     if old not in text:
         return text
