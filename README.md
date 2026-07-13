@@ -1,117 +1,79 @@
 # claude-mv
 
-Repoint Claude Code's stored history when you rename or move a project directory.
+Rename or move a project directory without losing its Claude Code history.
 
 ## The problem
 
-Claude Code keeps each project's sessions under `~/.claude/projects/<encoded-path>/`.
-The directory name is the project's absolute path with every non-alphanumeric character replaced by `-`.
-So `/Users/me/my_proj` is stored as `-Users-me-my-proj`.
+Claude Code files each project's sessions under a name derived from the project's full path.
+Move or rename the directory and Claude looks under the new name, finds nothing, and starts fresh.
+Your past conversations and per-project settings are still on disk, just filed under the old path.
 
-Rename the project on disk and that encoded name stops matching.
-Claude Code then starts a fresh, empty history and your old sessions look lost.
-They are not gone, they are just filed under the old name.
+`claude-mv` refiles them under the new one.
 
-`claude-mv` refiles them under the new name.
-
-## Usage
+## Quick start
 
 ```bash
-# You already renamed ~/code/old-name to ~/code/new-name; fix Claude's bookkeeping:
-uv run claude_mv.py ~/code/old-name ~/code/new-name
-
-# Preview without changing anything:
-uv run claude_mv.py ~/code/old-name ~/code/new-name --dry-run
-
-# Also move the real project directory (default: leave the filesystem alone):
-uv run claude_mv.py ~/code/old-name ~/code/new-name --move-dir
+# You renamed ~/code/old to ~/code/new. Now point Claude's records at the new path:
+uv run claude_mv.py ~/code/old ~/code/new
 ```
 
-`uv run` reads the inline dependency block at the top of the script and fetches `cyclopts` for you.
-If `cyclopts` is already installed you can run `python claude_mv.py ...` directly.
+`claude_mv.py` is a single self-contained file.
+It declares its own dependencies, so `uv run` fetches them the first time and there is nothing to install.
+Add `-n` / `--dry-run` to see the plan without changing anything.
 
-Both paths are resolved (`~`, relative paths, and `..` all work).
-The old directory does not need to still exist, since the tool works from Claude's stored copy of it.
+Haven't renamed the folder yet? Let the tool do that too:
 
-### Options
+```bash
+uv run claude_mv.py ~/code/old ~/code/new --move-dir
+```
 
-| Flag | Meaning |
+## What it updates
+
+Everything Claude keys by the project path:
+
+- the session transcripts, and the working directory recorded inside them
+- the project's line in `~/.claude/history.jsonl`
+- the project's entry in `~/.claude.json`: allowed tools, MCP servers, trust, usage stats
+
+Your actual project directory is left alone unless you pass `--move-dir`.
+
+## Options
+
+| Option | |
 | --- | --- |
-| `--dry-run`, `-n` | Show the plan and touch nothing. |
-| `--move-dir` | Also move the real project directory, not just `~/.claude`. |
-| `--rewrite-content` | Also rewrite incidental path mentions inside session and history files, not just the pointer fields (see below). |
-| `--on-conflict abort\|merge\|clean` | What to do if the destination already has history (default `abort`). |
-| `--yes`, `-y` | Skip the confirmation prompt. Required in a non-interactive shell. |
-| `--force` | Override the destination-identity safety check (see below). |
-| `--claude-dir PATH` | Point at a different data directory (default `~/.claude`, handy for testing). |
+| `-n`, `--dry-run` | Show the plan and change nothing. |
+| `--move-dir` | Move the real project folder too, not just the records. |
+| `--rewrite-content` | Also replace the old path where it is mentioned inside logged commands and captured output, not only in the fields Claude reads. |
+| `--on-conflict merge\|clean` | If the destination already has history: `merge` the two, or `clean` (back it up and replace it). Defaults to stopping. |
+| `--heal` | Finish a half-done migration (see below). |
+| `-y`, `--yes` | Skip the confirmation prompt (required when there's no terminal). |
 
-## What it changes
+Both paths accept `~`, relative paths, and `..`. The old folder does not need to still exist.
 
-1. Renames `~/.claude/projects/<encoded-old>` to `<encoded-new>` (this carries the session files and the `memory/` subdir along with it).
-2. Rewrites the `cwd` field inside each session `*.jsonl`.
-3. Rewrites the `project` field in `~/.claude/history.jsonl`.
-4. Remaps the project's entry in `~/.claude.json` (the `projects` map keyed by absolute path, plus `githubRepoPaths`).
-   This is the per-project config: allowed tools, MCP servers, trust acceptance, and stats.
-   Both community shell scripts miss this, so a rename silently drops those settings.
-5. Defensively renames any `<encoded-old>` entry under the sibling dirs `todos/`, `file-history/`, `shell-snapshots/`, and `debug/`.
-   On current Claude Code these are keyed by session id, not project path, so there is usually nothing to move.
-   Some versions key them by path, and this keeps the tool correct for them.
+## Re-running is safe
 
-By default it does not move your actual project directory.
-Pass `--move-dir` if you want it to.
-
-## Re-running (resumable)
-
-Running the same `OLD NEW` again is safe and resumable.
-If the default migration already happened, the tool notices that the project now lives at the new encoded name and only does the work that is left, rather than reporting "nothing found".
-
-So a common flow is to run it once, then re-run with an added flag:
+Run it again with the same arguments and it resumes from wherever it left off, so a two-step flow just works:
 
 ```bash
-uv run claude_mv.py ~/code/old ~/code/new                 # metadata only
-uv run claude_mv.py ~/code/old ~/code/new --rewrite-content # now also fix incidental mentions
-uv run claude_mv.py ~/code/old ~/code/new --move-dir        # now also move the real folder
+uv run claude_mv.py ~/code/old ~/code/new              # records only
+uv run claude_mv.py ~/code/old ~/code/new --move-dir   # ...then move the folder
 ```
 
-Each of these steps is idempotent: once its work is done, re-running it just prints "Already migrated; nothing to do".
+When there is nothing left to do, it says so and stops.
 
-The state is verified rather than guessed at.
-If the project's sessions mix old and new `cwd` references (a half-finished migration), the tool refuses and asks you to re-run with `--heal` to finish it.
-If `--move-dir` is asked for but the real directory is in an in-between state (both the old and new paths exist, or neither does), it refuses too.
+## What makes this fiddly (and why the tool exists)
 
-## Why it is careful where the reference scripts are not
+Doing it by hand is trickier than renaming a folder:
 
-This is a from-scratch reimplementation of the shell `claude-mv` scripts, written to avoid their data-loss modes.
+- **The stored name is not your path.** Claude replaces every non-alphanumeric character with `-`, and the mapping is lossy, so you cannot reliably reverse it. The tool computes the name exactly the way Claude does.
+- **The path is written in several places.** Rename just the folder and the working directory inside every transcript still points at the old path, as do `history.jsonl` and `~/.claude.json`. Miss one and the history looks half-broken.
+- **Prefixes are a trap.** Renaming `/proj` must not touch `/proj-2` or `/proj/sub` by accident. Every rewrite is anchored to a real path boundary.
+- **Half-finished states are ambiguous.** If a project ends up with some records pointing at the old path and some at the new one, the tool refuses to guess and asks you to re-run with `--heal`.
 
-- **JSON-aware, field-scoped rewrites.**
-  By default it parses each line and edits only the location-pointer fields: `cwd` in sessions, `project` in history, and the `projects`/`githubRepoPaths` entries in `~/.claude.json`.
-  It never does a blind text substitution, so an old path that appears incidentally inside a logged shell command or captured tool output is left untouched.
-  Rewriting that incidental text would corrupt the historical record and can silently mangle unrelated data.
-  If you do want the incidental mentions rewritten too, `--rewrite-content` opts in, and even then the replacement is path-boundary-aware so `/proj` inside `/proj-2` is still safe.
+Before it changes anything it writes a backup under `~/.claude/claude-mv-backups/`, and if a step fails partway it rolls the whole thing back.
 
-- **Correct, verified encoding.**
-  The encoding replaces every non-alphanumeric character, not just `/` and `.`.
-  This was checked against every local project directory.
-  The common shell version only substitutes `/` and `.`, so it silently fails on any path containing `_`, a space, `@`, `+`, and so on.
+## Notes
 
-- **Prefix-boundary matching.**
-  A path is only rewritten when it equals the old path or sits under it with a real separator boundary.
-  So renaming `/proj` never disturbs `/proj-2`.
-
-- **Encoding-collision guard.**
-  The encoding is lossy, so two different real paths can map to the same directory name (`/Users/a.b` and `/Users/a/b` both become `-Users-a-b`).
-  If the destination already holds history that belongs to a genuinely different project, `merge` and `clean` refuse rather than blend or delete an unrelated project's data.
-  Use `--force` only when you are sure.
-
-- **Backup and rollback.**
-  Before any change it copies the affected files into `~/.claude/claude-mv-backups/<timestamp>/`.
-  If anything fails midway, it restores the original state.
-  Writes are atomic (temp file plus rename).
-  These backups are never pruned, so delete old ones yourself once you no longer need them.
-
-## Scope note
-
-On current Claude Code, `todos/`, `file-history/`, `session-env/`, `shell-snapshots/`, and `debug/` are keyed by session id or content hash, not by the project path.
-A project rename does not change those keys, so their contents are left alone.
-The path can still appear inside them (a debug log line, a snapshot of a file that mentions its own path), but that is historical content, not a location pointer, so rewriting it would be wrong.
-The one exception is a `<encoded>` directory keyed by the project path, which this tool does move (see item 5 above).
+- `--rewrite-content` does a best-effort literal replacement of the old path inside free text (commands you ran, tool output). It is off by default because that text is a record of what actually happened, and the default run leaves it untouched.
+- Backups are never cleaned up automatically. Delete old ones from `~/.claude/claude-mv-backups/` when you no longer need them.
+- Needs Python 3.12+ (uv will fetch one if needed).
