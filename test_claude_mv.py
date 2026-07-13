@@ -325,6 +325,34 @@ def test_rollback_on_failure(tmp_path, monkeypatch):
     assert json.loads(cj.read_text())["projects"] == {OLD: {"a": 1}}
 
 
+def test_rollback_move_dir_restores_real_dir(tmp_path, monkeypatch):
+    # the highest-stakes rollback branch: a failed --move-dir must put the real
+    # project directory back and undo the metadata too
+    real_old = tmp_path / "real" / "proj"
+    real_old.mkdir(parents=True)
+    (real_old / "main.py").write_text("code")
+    real_new = tmp_path / "real" / "proj2"
+    e_old = enc(str(real_old))
+    cd, cj = build(
+        tmp_path,
+        sessions={e_old: [{"cwd": str(real_old)}]},
+        cjson={"projects": {str(real_old): {"a": 1}}},
+    )
+    original = claude_mv._rewrite_claude_json
+
+    def boom(path, old, new, *, apply):
+        if apply:
+            raise RuntimeError("boom")
+        return original(path, old, new, apply=apply)
+
+    monkeypatch.setattr(claude_mv, "_rewrite_claude_json", boom)
+    with pytest.raises(RuntimeError):
+        run(cd, cj, str(real_old), str(real_new), move_dir=True)
+    assert (real_old / "main.py").read_text() == "code"  # real dir back
+    assert not real_new.exists()
+    assert (cd / "projects" / e_old).exists()  # metadata back too
+
+
 def test_mixed_refused_then_heal(tmp_path):
     # dir already at enc_new, one stray old cwd -> genuine (non-nested) partial state
     cd, cj = build(tmp_path)
