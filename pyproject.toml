@@ -21,8 +21,9 @@ classifiers = [
   # i.e.: Environment, Framework, Intended Audience, Topic
   # TODO: update the development status
   "Development Status :: 1 - Planning",
-  # target os
-  "Operating System :: OS Independent",
+  # target os: POSIX-only; the path handling is not tested on Windows yet
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
   # python versions
   "Programming Language :: Python",
   "Programming Language :: Python :: 3",

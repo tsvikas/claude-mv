@@ -110,14 +110,13 @@ jobs:
             os: ubuntu-latest
             python-version: '3.12'
           # test with different os
+          # windows is intentionally omitted: claude-mv is POSIX-only (see the
+          # Operating System classifiers in pyproject.toml).
           - resolution: locked
             os: ubuntu-latest
             python-version: '3.12'
           - resolution: locked
             os: macos-latest
-            python-version: '3.12'
-          - resolution: locked
-            os: windows-latest
             python-version: '3.12'
       fail-fast: false
     runs-on: ${{ matrix.os }}

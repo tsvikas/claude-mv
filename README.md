@@ -92,6 +92,7 @@ Before it changes anything it writes a backup under `~/.claude/claude-mv-backups
 - `--rewrite-content` does a best-effort literal replacement of the old path inside free text (commands you ran, tool output). It is off by default because that text is a record of what actually happened, and the default run leaves it untouched.
 - Backups are never cleaned up automatically. Delete old ones from `~/.claude/claude-mv-backups/` when you no longer need them.
 - Requires Python 3.12+.
+- Tested on Linux and macOS. It is not tested on Windows yet, so treat Windows as unsupported for now.
 
 ## Contributing
 
