@@ -21,10 +21,10 @@ Your past conversations and per-project settings are still on disk, just filed u
 
 ## Install
 
-Install this tool using pipx (or uv):
+Install this tool using uv (or pipx):
 
 ```bash
-pipx install git+https://github.com/tsvikas/claude-mv.git
+uv tool install git+https://github.com/tsvikas/claude-mv.git
 ```
 
 ## Quick start
