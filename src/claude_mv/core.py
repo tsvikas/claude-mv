@@ -1,9 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["cyclopts>=3"]
-# ///
-"""Move a project's Claude Code bookkeeping when its directory is renamed or moved.
+"""Engine for moving a Claude Code project's bookkeeping when its directory moves.
 
 Claude Code stores each project's sessions under `~/.claude/projects/<encoded-path>/`,
 where the directory name is the project's absolute path with every non-alphanumeric
@@ -11,28 +6,23 @@ character replaced by `-`.
 Rename the project on disk and that encoded name no longer matches, so Claude Code
 starts a fresh, empty history and the old sessions look lost.
 
-This tool repoints the bookkeeping at the new path:
+This module repoints the bookkeeping at the new path:
 it renames the `projects/<encoded>` directory, rewrites the `cwd` field inside the
 session `*.jsonl` files, and rewrites the `project` field in `~/.claude/history.jsonl`.
-By default it touches nothing outside `~/.claude`; pass `--move-dir` to also move the
-real project directory.
-
-Run with `uv run claude_mv.py OLD NEW`, or install cyclopts and run directly.
+`resolve_plan` reads the current state without touching disk; `execute` performs the
+move and rolls back fully on any failure.
+Nothing outside `~/.claude` is touched unless the caller sets `move_dir`.
 """
 
 import json
 import os
 import re
 import shutil
-import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
-
-from cyclopts import App, Parameter
 
 DEFAULT_CLAUDE_DIR = Path.home() / ".claude"
 DEFAULT_CLAUDE_JSON = Path.home() / ".claude.json"
@@ -43,11 +33,6 @@ DEFAULT_CLAUDE_JSON = Path.home() / ".claude.json"
 # entry simply won't exist and is skipped. Renaming them anyway keeps the tool correct
 # across versions that do key them by path (see the reference scripts).
 PATH_KEYED_DIRS = ("projects", "todos", "file-history", "shell-snapshots", "debug")
-
-app = App(
-    name="claude-mv",
-    help="Move a project's Claude Code history when its directory is renamed.",
-)
 
 
 # Claude Code's path encoding: every non-alphanumeric character becomes '-'.
@@ -65,7 +50,8 @@ def to_abs(p: Path | str) -> str:
     Symlinks are left unresolved so the result matches the path the user refers to
     (and, for the destination, the path they will `cd` into).
     """
-    return os.path.abspath(Path(p).expanduser())
+    # Not Path.resolve(): that would resolve symlinks, which this deliberately avoids.
+    return os.path.abspath(Path(p).expanduser())  # noqa: PTH100
 
 
 def _iter_cwds(project_dir: Path) -> Iterator[str]:
@@ -145,13 +131,13 @@ def sub_projects_under(projects_dir: Path, old: str, src_dir: Path | None) -> li
             cwd = read_root_cwd(sub, sub.name)
             if cwd:
                 root = to_abs(cwd)
-                if root != old and _under(root, old):
+                if root != old and is_under(root, old):
                     found.append(root)
     return found
 
 
-def _under(path: str, base: str) -> bool:
-    """True if `path` is `base` or a descendant of it, on a real separator boundary.
+def is_under(path: str, base: str) -> bool:
+    """Return whether `path` is `base` or a descendant, on a real separator boundary.
 
     The boundary check keeps `/proj` from being considered under `/proj-2`.
     """
@@ -160,7 +146,7 @@ def _under(path: str, base: str) -> bool:
 
 def remap(value: str, old: str, new: str) -> str | None:
     """Return `value` with its `old` path prefix swapped for `new`, else None."""
-    return new + value[len(old) :] if _under(value, old) else None
+    return new + value[len(old) :] if is_under(value, old) else None
 
 
 def cwd_targets(project_dir: Path, old: str, new: str) -> tuple[bool, bool]:
@@ -171,8 +157,8 @@ def cwd_targets(project_dir: Path, old: str, new: str) -> tuple[bool, bool]:
     """
     has_old = has_new = False
     for cwd in _iter_cwds(project_dir):
-        has_old = has_old or _under(cwd, old)
-        has_new = has_new or _under(cwd, new)
+        has_old = has_old or is_under(cwd, old)
+        has_new = has_new or is_under(cwd, new)
         if has_old and has_new:
             break
     return has_old, has_new
@@ -253,7 +239,8 @@ def _replace_paths_in_text(text: str, old: str, new: str) -> str:
     `/proj v2` into `/proj v2 v2`. (2) A sibling whose boundary char isn't `-`, `_`, or
     `.` (say `/proj@bak`) is treated as a distinct path and rewritten. Only the `-` `_`
     `.` and `/` renames are handled cleanly. The default pointer rewrites avoid all of
-    this by matching whole field values via `_under`, so a normal run never touches it.
+    this by matching whole field values via `is_under`, so a normal run never touches
+    it.
     """
     if old not in text:
         return text
@@ -317,7 +304,7 @@ def _remap_json(obj: object, old: str, new: str) -> tuple[object, int]:
         for key, value in obj.items():
             new_key = remap(key, old, new) if isinstance(key, str) else None
             if new_key is not None:
-                key = new_key
+                key = new_key  # noqa: PLW2901
                 count += 1
             new_value, sub = _remap_json(value, old, new)
             count += sub
@@ -375,11 +362,13 @@ def claude_json_collisions(path: Path, old: str, new: str) -> list[str]:
         if isinstance(obj, dict):
             targets: dict[str, object] = {}
             for key, value in obj.items():
-                target = (remap(key, old, new) or key) if isinstance(key, str) else key
-                if target in targets and targets[target] != value:
-                    found.append(target)
-                else:
-                    targets[target] = value
+                # JSON object keys are always strings; the guard also narrows the type.
+                if isinstance(key, str):
+                    target = remap(key, old, new) or key
+                    if target in targets and targets[target] != value:
+                        found.append(target)
+                    else:
+                        targets[target] = value
                 walk(value)
         elif isinstance(obj, list):
             for value in obj:
@@ -445,15 +434,6 @@ def _restore_pair(original: Path, saved: Path) -> None:
         shutil.copy2(saved, original)
 
 
-def _confirm(prompt: str) -> bool:
-    if not sys.stdin.isatty():
-        return False
-    try:
-        return input(prompt).strip().lower() in ("y", "yes")
-    except EOFError:
-        return False
-
-
 @dataclass
 class Plan:
     """Everything resolved about one move: where things are and what work remains.
@@ -491,30 +471,37 @@ class Plan:
 
     @property
     def history_file(self) -> Path:
+        """Path to `~/.claude/history.jsonl`."""
         return self.claude_dir / "history.jsonl"
 
     @property
     def dst_dir(self) -> Path:
+        """Destination `projects/<enc_new>` directory."""
         return self.claude_dir / "projects" / self.enc_new
 
     @property
     def move_pending(self) -> bool:
+        """Whether the real dir still needs moving (old exists, new doesn't)."""
         return self.move_dir and self.old_exists and not self.new_exists
 
     @property
     def move_done(self) -> bool:
+        """Whether the real dir was already moved (new exists, old is gone)."""
         return self.move_dir and self.new_exists and not self.old_exists
 
     @property
     def move_bad(self) -> bool:
+        """Whether `--move-dir` was asked for but the dir state is neither of those."""
         return self.move_dir and not (self.move_pending or self.move_done)
 
     @property
     def projects_rename_pending(self) -> bool:
+        """Whether the `projects/` dir still needs renaming to `enc_new`."""
         return self.src_dir is not None and not self.migrated
 
     @property
     def any_work(self) -> bool:
+        """Whether any migration step still remains to do."""
         return bool(
             self.projects_rename_pending
             or self.sess_hits
@@ -577,8 +564,7 @@ def resolve_plan(
     cjson_hits = _rewrite_claude_json(claude_json, old_stored, new_abs, apply=False)
 
     # Sibling dirs that some Claude Code versions key by the encoded path. Present only
-    # if
-    # such a version created them; on current versions they are session-keyed, so the
+    # if such a version created them; on current versions they are session-keyed, so the
     # `<encoded>` entry does not exist and the list is empty.
     extra_moves = [
         (name, claude_dir / name / enc_old, claude_dir / name / enc_new)
@@ -640,115 +626,6 @@ def resolve_plan(
     )
 
 
-def print_plan(plan: Plan) -> None:
-    """Print the human-readable plan summary."""
-    print("claude-mv plan")
-    print(f"  old path : {plan.old_stored}")
-    print(f"  new path : {plan.new_abs}")
-    if plan.migrated:
-        print(f"  projects/: already at {plan.enc_new} (migration done)")
-    else:
-        print(f"  projects/: {plan.enc_old}  ->  {plan.enc_new}")
-    if plan.src_dir is None:
-        print("  (no projects/ directory found at the old or new path)")
-    else:
-        unit = "path mention(s)" if plan.rewrite_content else "cwd reference(s)"
-        print(
-            f"  sessions : {plan.n_sessions} file(s),"
-            f" {plan.sess_hits} {unit} to rewrite"
-        )
-    for name, _src, _dst in plan.extra_moves:
-        print(f"  {name}/: {plan.enc_old}  ->  {plan.enc_new}")
-    print(f"  history  : {plan.hist_hits} line(s) to rewrite in history.jsonl")
-    print(f"  config   : {plan.cjson_hits} entry(ies) to remap in .claude.json")
-    if plan.move_pending:
-        print(f"  move dir : {plan.old_abs}  ->  {plan.new_abs}  (real directory)")
-    elif plan.move_done:
-        print(f"  move dir : already at {plan.new_abs}")
-    elif plan.move_bad:
-        print(
-            "  move dir : cannot"
-            f" ({'both exist' if plan.old_exists else 'neither exists'})"
-        )
-    if plan.mixed:
-        print("  WARNING  : sessions mix old and new cwd (partial migration)")
-    if plan.content_warn:
-        print(
-            "  WARNING  : --rewrite-content and the new path extends the old across a"
-            " space/@/+; re-running would double-apply. Check the result, don't re-run."
-        )
-
-
-def check_refusals(
-    plan: Plan, *, heal: bool, force: bool, on_conflict: str
-) -> int | None:
-    """Apply every up-front gate in order; return an exit code to stop, or None to go.
-
-    Order is load-bearing: move-dir state, partial migration, config collision, the
-    nothing-to-do shortcut, then the destination conflict (whose banner prints here).
-    """
-    if plan.move_bad:
-        where = (
-            "both the old and new directories exist"
-            if plan.old_exists
-            else "neither the old nor the new directory exists"
-        )
-        print(f"Refusing --move-dir: {where}; resolve it by hand first.")
-        return 2
-
-    if plan.sub_projects:
-        shown = ", ".join(plan.sub_projects[:3])
-        if len(plan.sub_projects) > 3:
-            shown += f", (+{len(plan.sub_projects) - 3} more)"
-        example = plan.sub_projects[0]
-        target = remap(example, plan.old_stored, plan.new_abs)
-        print(
-            f"Refusing: {len(plan.sub_projects)} separate project(s) live under"
-            f" {plan.old_stored}: {shown}."
-            f" Move each first, e.g. claude-mv {example} {target}"
-        )
-        return 2
-
-    if plan.mixed and not heal:
-        print(
-            "Refusing: this project's sessions mix old and new cwd references, which"
-            " looks like a partial migration. Re-run with --heal to finish it."
-        )
-        return 2
-
-    if plan.cjson_collisions:
-        joined = ", ".join(plan.cjson_collisions)
-        print(
-            f"Refusing: .claude.json already has an entry for {joined} that differs"
-            " from the one being migrated. Remove one by hand, then re-run."
-        )
-        return 2
-
-    if not plan.any_work:
-        print("Already migrated; nothing to do." if plan.migrated else "Nothing to do.")
-        return 0
-
-    if plan.conflict:
-        print(
-            f"  CONFLICT : destination {plan.enc_new} already exists"
-            f" (belongs to {plan.conflict_cwd or 'unknown'})"
-        )
-        if not plan.conflict_related and not force:
-            print(
-                "Refusing: the existing destination history belongs to a different"
-                " project (encoding collision)."
-                " Re-run with --force only if you are sure."
-            )
-            return 2
-        if on_conflict == "abort":
-            print(
-                "Destination exists. Re-run with --on-conflict merge|clean to proceed."
-            )
-            return 2
-
-    return None
-
-
 def _rollback(
     *,
     moved_real: bool,
@@ -757,8 +634,11 @@ def _rollback(
     created: list[Path],
     backup_pairs: list[tuple[Path, Path]],
 ) -> None:
-    """Undo a partial execute: move the real dir back, delete rename-created dirs, then
-    restore every backed-up item to its pre-run bytes."""
+    """Undo a partial execute.
+
+    Move the real dir back, delete rename-created dirs, then restore every backed-up
+    item to its pre-run bytes.
+    """
     if moved_real and Path(new_abs).exists() and not Path(old_abs).exists():
         shutil.move(new_abs, old_abs)
     for path in reversed(created):
@@ -773,9 +653,11 @@ def _rollback(
 
 
 def _backup_items(plan: Plan) -> list[Path]:
-    """Everything execute may modify or delete: the source dir, any merge destinations
-    (restored wholesale on failure), history, and the config file. Non-existent entries
-    are dropped by `_backup`."""
+    """Everything execute may modify or delete.
+
+    The source dir, any merge destinations (restored wholesale on failure), history, and
+    the config file. Non-existent entries are dropped by `_backup`.
+    """
     items: list[Path] = [plan.src_dir] if plan.src_dir else []
     if plan.conflict:
         items.append(plan.dst_dir)
@@ -787,16 +669,27 @@ def _backup_items(plan: Plan) -> list[Path]:
     return items
 
 
-def execute(plan: Plan, *, on_conflict: str) -> list[str]:
+def execute(
+    plan: Plan, *, on_conflict: str, report: Callable[[str], None] | None = None
+) -> list[str]:
     """Back up, perform the move + rewrites, and roll back fully on any failure.
 
-    Returns collected warnings; re-raises the original error after rolling back.
+    Args:
+        plan: The resolved move, from `resolve_plan`.
+        on_conflict: `abort`, `merge`, or `clean` when the destination already exists.
+        report: Optional sink for progress lines (e.g. the backup location), called
+            before the risky work so the location is known even if the process is
+            killed. The engine itself never writes to stdout.
+
+    Returns:
+        Collected warnings; re-raises the original error after rolling back.
     """
     backup_items = _backup_items(plan)
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     backup_root = plan.claude_dir / "claude-mv-backups" / f"{stamp}-{plan.enc_old}"
     backup_pairs = _backup(backup_items, backup_root)
-    print(f"  backup   : {backup_root}")
+    if report is not None:
+        report(f"  backup   : {backup_root}")
 
     warnings: list[str] = []
     created: list[Path] = []  # paths a rename created; delete these on rollback
@@ -850,8 +743,7 @@ def execute(plan: Plan, *, on_conflict: str) -> list[str]:
         _rewrite_claude_json(
             plan.claude_json, plan.old_stored, plan.new_abs, apply=True
         )
-    except BaseException as exc:
-        print(f"Error: {exc}\nRolling back...", file=sys.stderr)
+    except BaseException:
         _rollback(
             moved_real=moved_real,
             old_abs=plan.old_abs,
@@ -859,105 +751,5 @@ def execute(plan: Plan, *, on_conflict: str) -> list[str]:
             created=created,
             backup_pairs=backup_pairs,
         )
-        print("Rolled back to the pre-move state.", file=sys.stderr)
         raise
     return warnings
-
-
-@app.default
-def main(
-    old: str,
-    new: str,
-    *,
-    on_conflict: Literal["abort", "merge", "clean"] = "abort",
-    move_dir: bool = False,
-    rewrite_content: bool = False,
-    heal: bool = False,
-    dry_run: Annotated[bool, Parameter(alias="-n")] = False,
-    yes: Annotated[bool, Parameter(alias="-y")] = False,
-    force: bool = False,
-    claude_dir: Path = DEFAULT_CLAUDE_DIR,
-    claude_json: Path = DEFAULT_CLAUDE_JSON,
-) -> int:
-    """Repoint Claude Code's bookkeeping from an old project path to a new one.
-
-    Parameters
-    ----------
-    old
-        The project's old absolute path (before the rename/move). `~`, relative paths,
-        and `..` are resolved. The directory need not still exist.
-    new
-        The project's new absolute path (after the rename/move).
-    on_conflict
-        What to do if the destination already has Claude history: `abort` (default),
-        `merge` old sessions into it, or `clean` (back up and replace it). `merge` and
-        `clean` refuse unless the existing history actually belongs to this project.
-    move_dir
-        Also move the real project directory from `old` to `new` (default: leave the
-        filesystem alone and only fix `~/.claude`).
-    rewrite_content
-        Also replace incidental path mentions inside session files and history.jsonl
-        (logged shell commands, captured output), not just the `cwd`/`project` pointer
-        fields. Off by default, since that text is a record of what actually happened.
-    heal
-        Proceed even when the project is in a partial-migration state (its sessions mix
-        old and new `cwd` references), finishing the move. Without it such a state is
-        refused rather than guessed at.
-    dry_run
-        Show what would change and touch nothing.
-    yes
-        Skip the confirmation prompt. Required to proceed in a non-interactive shell.
-    force
-        Override the safety check that the destination history belongs to this project.
-    claude_dir
-        Location of the Claude data directory (default: `~/.claude`). For testing.
-    claude_json
-        Location of Claude's per-project config file (default: `~/.claude.json`).
-        For testing.
-    """
-    old_abs = to_abs(old)
-    new_abs = to_abs(new)
-    if old_abs == new_abs:
-        print("Old and new paths resolve to the same location; nothing to do.")
-        return 1
-    # Nested paths break the prefix remap: the result stays under `old`, so the rewrite
-    # is neither reversible nor idempotent (a re-run would append again). Refuse.
-    if _under(new_abs, old_abs) or _under(old_abs, new_abs):
-        print("Refusing: the old and new paths overlap (one is inside the other).")
-        return 1
-
-    plan = resolve_plan(
-        old_abs,
-        new_abs,
-        claude_dir,
-        claude_json,
-        move_dir=move_dir,
-        rewrite_content=rewrite_content,
-    )
-    print_plan(plan)
-
-    code = check_refusals(plan, heal=heal, force=force, on_conflict=on_conflict)
-    if code is not None:
-        return code
-
-    if dry_run:
-        print("Dry run: no changes made.")
-        return 0
-
-    if not yes:
-        if not sys.stdin.isatty():
-            print("Refusing to proceed without --yes in a non-interactive shell.")
-            return 1
-        if not _confirm("Proceed? [y/N] "):
-            print("Aborted.")
-            return 1
-
-    warnings = execute(plan, on_conflict=on_conflict)
-    print("Done.")
-    for w in warnings:
-        print(f"  note: {w}")
-    return 0
-
-
-if __name__ == "__main__":
-    app()

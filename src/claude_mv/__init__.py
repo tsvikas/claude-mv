@@ -1,4 +1,4 @@
-"""claude-mv: Move a Claude Code project's session history when its directory is renamed.
+"""claude-mv: move a Claude Code project's history when its directory is renamed.
 
 © 2026 Tsvika Shapira. Some rights reserved.
 """
