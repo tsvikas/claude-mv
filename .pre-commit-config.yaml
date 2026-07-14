@@ -15,24 +15,24 @@ repos:
   # Sync Python and pre-commit package versions
   # pyproject.toml -> uv.lock
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: <placeholder_until_update_deps>
+    rev: 0.11.28
     hooks:
       - id: uv-lock
   # uv.lock -> .pre-commit-config.yaml
   - repo: https://github.com/tsvikas/sync-with-uv
-    rev: <placeholder_until_update_deps>
+    rev: v0.6.0
     hooks:
       - id: sync-with-uv
   # .pre-commit-config.yaml -> .pre-commit-config.yaml
   - repo: https://github.com/pre-commit/sync-pre-commit-deps
-    rev: <placeholder_until_update_deps>
+    rev: v0.0.4
     hooks:
       - id: sync-pre-commit-deps
         args: [--yaml-mapping, '2', --yaml-sequence, '4', --yaml-offset, '2']
 
   # General hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: <placeholder_until_update_deps>
+    rev: v6.0.0
     hooks:
       # Filesystem
       - id: check-illegal-windows-names
@@ -71,7 +71,7 @@ repos:
       - id: pretty-format-json
         exclude_types: [jupyter]
   - repo: https://github.com/pre-commit/pygrep-hooks
-    rev: <placeholder_until_update_deps>
+    rev: v1.10.0
     hooks:
       # Python files
       - id: python-check-blanket-noqa
@@ -89,29 +89,29 @@ repos:
 
   # Security
   - repo: https://github.com/Yelp/detect-secrets
-    rev: <placeholder_until_update_deps>
+    rev: v1.5.0
     hooks:
       - id: detect-secrets
         args: ['--baseline', '.secrets.baseline']
 
   # All files
   - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
-    rev: <placeholder_until_update_deps>
+    rev: 3.6.1
     hooks:
       - id: editorconfig-checker
         exclude_types: [jupyter]
   - repo: https://github.com/google/keep-sorted
-    rev: <placeholder_until_update_deps>
+    rev: v0.9.1
     hooks:
       - id: keep-sorted
 
   # Spell checking
   - repo: https://github.com/codespell-project/codespell
-    rev: <placeholder_until_update_deps>
+    rev: v2.4.2
     hooks:
       - id: codespell
   - repo: https://github.com/adhtruong/mirrors-typos
-    rev: <placeholder_until_update_deps>
+    rev: v1.48.0
     hooks:
       - id: typos
   - repo: local
@@ -124,7 +124,7 @@ repos:
 
   # Markdown files
   - repo: https://github.com/hukkin/mdformat
-    rev: <placeholder_until_update_deps>
+    rev: 1.0.0
     hooks:
       - id: mdformat
         exclude: ^docs/reference/
@@ -136,13 +136,13 @@ repos:
 
   # reStructuredText files
   - repo: https://github.com/PyCQA/doc8
-    rev: <placeholder_until_update_deps>
+    rev: v2.0.0
     hooks:
       - id: doc8
 
   # Python files
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: <placeholder_until_update_deps>
+    rev: v0.15.21
     hooks:
       - id: ruff-check
         alias: ruff-isort
@@ -152,7 +152,7 @@ repos:
         types_or: [python, pyi, jupyter, markdown]
       - id: ruff-check
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: <placeholder_until_update_deps>
+    rev: v2.2.0
     hooks:
       - id: mypy
         name: mypy (without imports)
@@ -173,44 +173,44 @@ repos:
 
   # pyproject.toml
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: <placeholder_until_update_deps>
+    rev: 2026.07.08
     hooks:
       - id: validate-pyproject
 
   # YAML files
   - repo: https://github.com/adrienverge/yamllint
-    rev: <placeholder_until_update_deps>
+    rev: v1.38.0
     hooks:
       - id: yamllint
 
   # GitHub files
   - repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: <placeholder_until_update_deps>
+    rev: 0.37.4
     hooks:
       - id: check-dependabot
       - id: check-github-actions
       - id: check-github-workflows
       - id: check-readthedocs
   - repo: https://github.com/rhysd/actionlint
-    rev: <placeholder_until_update_deps>
+    rev: v1.7.12
     hooks:
       - id: actionlint
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: <placeholder_until_update_deps>
+    rev: v1.27.0
     hooks:
       - id: zizmor
 
   # Shell scripts
   - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: <placeholder_until_update_deps>
+    rev: v0.11.0.1
     hooks:
       - id: shellcheck
   - repo: https://github.com/scop/pre-commit-shfmt
-    rev: <placeholder_until_update_deps>
+    rev: v3.13.1-1
     hooks:
       - id: shfmt
   - repo: https://github.com/hugoh/pre-commit-fish
-    rev: <placeholder_until_update_deps>
+    rev: v1.2
     hooks:
       - id: fish_syntax
       - id: fish_indent
