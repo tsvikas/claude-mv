@@ -1,0 +1,266 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Many color libraries just need this variable to be set to any value.
+  # Set it to 3 to support 8-bit color graphics (256 colors per channel)
+  # for libraries that care about the value set.
+  FORCE_COLOR: 3
+
+jobs:
+  format-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          args: format --check
+
+  ruff-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+
+  prek:
+    env:
+      COLUMNS: 120
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: j178/prek-action@e98a699c41eb69ab013a45817a0406469a748f8d # v2
+
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.1
+        with:
+          cache-suffix: mypy
+      - name: Install packages
+        run: >-
+          uv sync
+          --exact
+          --all-extras
+          --no-default-groups
+          --group typing
+          --group test
+          --locked
+      - name: List packages
+        run: uv pip list
+      - name: Run mypy
+        run: uv run --no-sync mypy --num-workers "$(nproc)"
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.1
+        with:
+          cache-suffix: deps
+      - name: Install packages
+        run: >-
+          uv sync
+          --exact
+          --all-extras
+          --all-groups
+          --locked
+      - name: List packages
+        run: uv pip list
+      - name: Run deptry
+        run: uv run --no-sync --with deptry -- deptry src/
+      - name: Run pip-audit
+        run: >-
+          uv run --no-sync --with pip-audit -- pip-audit --skip-editable
+
+
+  test:
+    strategy:
+      matrix:
+        include:
+          # test with highest resolution
+          - resolution: highest
+            os: ubuntu-latest
+            python-version: '3.14'
+          # test with lowest resolution
+          - resolution: lowest
+            os: ubuntu-latest
+            python-version: '3.12'
+          # test with different os
+          - resolution: locked
+            os: ubuntu-latest
+            python-version: '3.12'
+          - resolution: locked
+            os: macos-latest
+            python-version: '3.12'
+          - resolution: locked
+            os: windows-latest
+            python-version: '3.12'
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    name: test-${{ matrix.python-version }}-${{ matrix.resolution }}-${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-suffix: ${{ matrix.resolution }}
+      - name: Install packages
+        id: install_packages
+        run: >-
+          uv sync
+          --exact
+          --all-extras
+          --no-default-groups
+          --group test
+          ${{ matrix.resolution == 'locked' && '--locked'
+              || matrix.resolution == 'lowest' && '--upgrade --resolution lowest-direct'
+              || matrix.resolution == 'highest' && '--upgrade --resolution highest'
+              || '--NON_RECOGNIZED_RESOLUTION'
+          }}
+      - name: List packages
+        run: uv pip list
+      - name: Run tests
+        id: run_tests
+        run: >-
+          uv run --no-sync --
+          pytest
+          --cov-branch
+          --cov-report=term
+          --cov-report=xml
+          --junitxml=junit.xml
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && steps.run_tests.conclusion != 'skipped' }}
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}  # zizmor: ignore[secrets-outside-env]
+          report_type: test_results
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}  # zizmor: ignore[secrets-outside-env]
+
+
+  test-pypy-and-prerelease:
+    strategy:
+      matrix:
+        include:
+          # test on prerelease
+          - resolution: prerelease
+            os: ubuntu-latest
+            python-version: '3.14'
+          - resolution: prerelease
+            os: ubuntu-latest
+            python-version: '3.15'
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    name: test-${{ matrix.python-version }}-${{ matrix.resolution }}-${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-suffix: ${{ matrix.resolution }}
+      - name: Install packages
+        id: install_packages
+        run: >-
+          uv sync
+          --exact
+          --all-extras
+          --no-default-groups
+          --group test
+          ${{ matrix.resolution == 'locked' && '--locked'
+              || matrix.resolution == 'lowest' && '--upgrade --resolution lowest-direct'
+              || matrix.resolution == 'highest' && '--upgrade --resolution highest'
+              || matrix.resolution == 'prerelease' && '--upgrade --resolution highest --prerelease allow'
+              || '--NON_RECOGNIZED_RESOLUTION'
+          }}
+        continue-on-error: true
+      - name: Stop job with warning if install fails
+        if: ${{ steps.install_packages.outcome == 'failure' }}
+        run: >-
+          echo "::warning::Stopping job due to installation failure on Python ${{ matrix.python-version }}"
+      - name: List packages
+        if: ${{ steps.install_packages.outcome == 'success' }}
+        run: uv pip list
+      - name: Run tests
+        if: ${{ steps.install_packages.outcome == 'success' }}
+        run: uv run --no-sync -- pytest --cov-branch --cov-report=xml --junitxml=junit.xml
+
+  pylint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.1
+        with:
+          cache-suffix: pylint
+      - name: Install packages
+        run: >-
+          uv sync
+          --exact
+          --all-extras
+          --no-default-groups
+          --locked
+      - name: List packages
+        run: uv pip list
+      # use pylint exitcode to fail only on errors.
+      - name: Run Pylint
+        run: |
+          set +e
+          uv run --no-sync --with pylint -- pylint src --output-format=github
+          result=$?
+          set -e
+          [ $((result & 1)) -ne 0 ] && echo "::error ::Pylint fatal(s) found"
+          [ $((result & 2)) -ne 0 ] && echo "::error ::Pylint error(s) found"
+          [ $((result & 4)) -ne 0 ] && echo "::warning ::Pylint warning(s) found"
+          [ $((result & 8)) -ne 0 ] && echo "::warning ::Pylint refactor(s) found"
+          [ $((result & 16)) -ne 0 ] && echo "::warning ::Pylint convention(s) found"
+          [ $((result & 32)) -ne 0 ] && echo "::error ::Pylint usage error"
+          exit $((result & 35))
+
+  pass:
+    if: ${{ always() }}
+    needs:
+      - format-python
+      - ruff-check
+      - prek
+      - mypy
+      - dependencies
+      - test
+      - test-pypy-and-prerelease
+      - pylint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}

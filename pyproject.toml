@@ -1,0 +1,282 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+
+[project]
+dynamic = ["version"]
+name = "claude-mv"
+description = "Move a Claude Code project's session history when its directory is renamed."
+license = "MIT"
+license-files = ["LICEN[CS]E.*"]
+readme = "README.md"
+authors = [
+  {name = "Tsvika Shapira", email = "tsvikas@gmail.com"}
+]
+keywords = []
+classifiers = [
+  # TODO: remove when ready to upload to pypi
+  "Private :: Do Not Upload",
+  # TODO: choose more classifiers from the list in https://pypi.org/classifiers/
+  # i.e.: Environment, Framework, Intended Audience, Topic
+  # TODO: update the development status
+  "Development Status :: 1 - Planning",
+  # target os
+  "Operating System :: OS Independent",
+  # python versions
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+# urls.Homepage = "https://claude-mv.readthedocs.io"
+urls.Source = "https://github.com/tsvikas/claude-mv"
+urls.Changelog = "https://github.com/tsvikas/claude-mv/blob/main/CHANGELOG.md"
+# urls.ReleaseNotes = "https://github.com/tsvikas/claude-mv/releases"
+# urls.Documentation = "https://claude-mv.readthedocs.io"
+urls.Issues = "https://github.com/tsvikas/claude-mv/issues"
+# urls.Funding = "https://github.com/sponsors/tsvikas"
+# Discussions = "https://github.com/tsvikas/claude-mv/discussions"
+
+requires-python = ">=3.12"
+dependencies = [
+  "cyclopts >=4",
+]
+
+[project.optional-dependencies]
+# optional_name = ["some_package >=1.0"]
+
+[project.scripts]
+claude-mv = "claude_mv.cli:app"
+
+[project.gui-scripts]
+# claude-mv = "claude_mv.gui:app.run"
+
+
+[dependency-groups]
+dev = [
+  ## used in the justfile
+  "rust-just ~=1.0",
+  "prek ~=0.4.0",
+  "ruff ~=0.15.0",
+  ## can be used for debug
+  "icecream >=2",
+  ## can be used for REPL
+  "ipython >=8",
+]
+test = [
+  "pytest ~=9.0",
+  ## running
+  "pytest-reverse ~=1.0",
+  "pytest-xdist[psutil] ~=3.0",
+  ## reporting
+  "pytest-clarity ~=1.0",
+  "pytest-github-actions-annotate-failures ~=0.4.0",
+  ## extras
+  "pytest-benchmark ~=5.0",
+  "pytest-cov ~=7.0",
+  ## fixtures
+  # "freezegun ~=1.0",
+  # "hypothesis ~=6.0",
+  # "pytest-datadir ~=1.0",
+  "pytest-mock ~=3.3",
+  # "pytest-regressions ~=2.0",
+]
+docs = [
+  "mkdocs ~=1.0",
+  "mkdocs-material ~=9.0",
+  "mkdocstrings-python ~=1.0",
+  "mkdocs-gen-files ~=0.5.0",
+  "mkdocs-literate-nav ~=0.6.0",
+  "mkdocs-section-index ~=0.3.0",
+]
+typing = [
+  "mypy ~=2.2.0",
+  "ty ~=0.0",
+  # add "*-stubs" and "types-*" packages here (">=0")
+]
+
+
+[tool.uv]
+required-version = ">=0.10.12"
+default-groups = ["dev", "test", "typing"]
+# Minimum age guard: only consider package versions released at least 24h ago,
+# as a lightweight supply-chain defense against just-published malicious releases.
+exclude-newer = "24 hours"
+
+
+[tool.hatch]
+version.source = "vcs"
+build.hooks.vcs.version-file = "src/claude_mv/_version.py"
+
+
+[tool.pytest]
+minversion = "9.0"
+testpaths = [
+  "src/",
+  "tests/",
+]
+addopts = [
+  ## collection
+  "--doctest-modules",
+  ## reporting
+  "-ra",
+  ## addons: pytest-benchmark
+  "--benchmark-disable",
+  ## addons: pytest-cov
+  # this might affect debuggers.
+  # use `--no-cov` to disable in the debugger
+  # see https://pytest-cov.readthedocs.io/en/latest/debuggers.html
+  "--cov=src/claude_mv",
+  "--cov-branch",
+  ## addons: pytest-reverse
+  "--reverse",
+  ## addons: pytest-xdist
+  # this enable parallel execution, but hides filenames in output
+  # "--numprocesses=auto",  # pytest-xdist
+]
+## testing
+strict = true
+empty_parameter_set_mark = "xfail"  # The default value in future releases
+filterwarnings = [
+  "error",
+  "default::DeprecationWarning",
+  "error::DeprecationWarning:claude_mv",
+]
+log_level = "INFO"
+
+
+[tool.coverage]
+run.omit = [
+  "src/claude_mv/__main__.py",
+  "src/claude_mv/_version.py",
+]
+
+
+[tool.ty]
+src.include = [
+    "src",
+    "tests",
+]
+
+
+[tool.mypy]
+files = ["src", "tests"]
+mypy_path = "stubs"
+fixed_format_cache = true
+# set the platform
+python_version = "3.12"
+# enable checks [last updated: mypy 2.2]
+strict = true
+strict_equality_for_none = true
+disallow_any_unimported = true
+warn_unreachable = true
+disallow_any_explicit = true
+enable_error_code = [
+  # from https://mypy.readthedocs.io/en/stable/error_code_list2.html
+  "redundant-self",
+  "deprecated",
+  "redundant-expr",
+  "possibly-undefined",
+  "truthy-bool",
+  "truthy-iterable",
+  "ignore-without-code",
+  "unused-awaitable",
+  "explicit-override",
+  "mutable-override",
+  "unimported-reveal",
+  "exhaustive-match",
+]
+
+
+[tool.deptry.per_rule_ignores]
+# add dependencies that are not used in the codebase
+DEP002 = [
+]
+
+
+[tool.ruff]
+# discover Markdown files so `ruff format` can format their code blocks
+extend-include = ["*.md"]
+
+
+[tool.ruff.format]
+docstring-code-format = true
+# enable preview mode to format code blocks inside Markdown files
+preview = true
+
+
+[tool.ruff.lint]
+# Use google-style conventions for docstrings
+pydocstyle.convention = "google"
+select = [
+  "ALL",
+  # extend rules outside pydocstyle google convention
+  "D401",  # pydocstyle/non-imperative-mood
+  "D404",  # pydocstyle/docstring-starts-with-this
+]
+ignore = [
+  # needed only in large codebases
+  "TD002",    # flake8-todos/missing-todo-author
+  "TD003",    # flake8-todos/missing-todo-link
+  # incompatible with other rules
+  "COM812",   # flake8-commas/missing-trailing-comma (incompatible with black)
+  # disagree:
+  "PD010",    # pandas-vet/pandas-use-of-dot-pivot-or-unstack
+  "PD013",    # pandas-vet/pandas-use-of-dot-stack
+  # annoying:
+  "EM10",     # flake8-errmsg/*-in-exception
+  "RET504",   # flake8-return/unnecessary-assign
+  # ban something useful for a possibly good reason
+  #"C901",     # mccabe/complex-structure
+  #"S101",     # flake8-bandit/assert
+  #"FIX00",    # flake8-fixme/line-contains-*
+  #"ERA001",   # eradicate/commented-out-code
+  #"PLR091",   # PyLint-Refactor/too-many-*
+  #"TRY003",   # tryceratops/raise-vanilla-args
+]
+# objects that should be treated equivalently to a logging.Logger object.
+logger-objects = ["loguru.logger"]
+# allow the omission of a return type hint for __init__
+flake8-annotations.mypy-init-return = true
+# allow `dict(a=1, b=2)`
+flake8-comprehensions.allow-dict-calls-with-keyword-arguments = true
+
+# flag modules or module members that may not be imported or accessed
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"collections.namedtuple".msg = "Use typing.NamedTuple or @dataclasses.dataclass(frozen=True, slots=True)"
+
+[tool.ruff.lint.per-file-ignores]
+"src/claude_mv/cli.py" = [
+  "T20",      # flake8-print
+]
+"src/claude_mv/_version.py" = [
+  "ALL",
+]
+"scripts/**.py" = [
+  "T20",      # flake8-print
+  "INP001",   # implicit-namespace-package
+]
+"!tests/test_*.py" = [
+  "PT",       # flake8-pytest-style
+]
+"tests/**.py" = [
+  "INP001",   # flake8-no-pep420/implicit-namespace-package
+]
+"tests/test_*.py" = [
+  "PLR2004",  # PyLint-Refactor/magic-value-comparison
+  "S101",     # flake8-bandit/assert
+  "D1",       # pydocstyle/undocumented-*
+  "TC001",    # flake8-type-checking/typing-only-*-import
+  "TC002",    # flake8-type-checking/typing-only-*-import
+  "TC003",    # flake8-type-checking/typing-only-*-import
+]
+
+
+[tool.pylint]
+py-version = "3.12"
+ignore-paths = [".*/_version.py"]
+reports.output-format = "colorized"

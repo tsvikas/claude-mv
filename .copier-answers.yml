@@ -1,0 +1,21 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.29.1
+_src_path: https://github.com/tsvikas/python-template
+audit_in_ci: false
+cli_framework: cyclopts
+format_tool: ruff
+get_package_version_from_vcs: true
+github_user: tsvikas
+in_codecov: true
+in_pypi: false
+in_rtd: false
+jupyter_files: forbid
+license: MIT
+package_description: Move a Claude Code project's session history when its directory
+    is renamed.
+package_name: claude_mv
+project_name: claude-mv
+python_min: 12
+user_email: tsvikas@gmail.com
+user_name: Tsvika Shapira
+year: 2026
