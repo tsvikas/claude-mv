@@ -8,6 +8,7 @@ engine in :mod:`claude_mv.core` stays print-free.
 import sys
 import traceback
 from collections.abc import Sequence
+from enum import IntEnum
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
 
@@ -20,6 +21,19 @@ app = App(
     help="Move a project's Claude Code history when its directory is renamed.",
 )
 app.register_install_completion_command()
+
+
+class ExitCode(IntEnum):
+    """Process exit codes returned by `claude_mv`. Documented in its docstring."""
+
+    OK = 0
+    # the user said no at the prompt, or gave no `--yes` without a terminal
+    DECLINED = 1
+    # the arguments cannot be used; also what cyclopts exits with on a parse error
+    USAGE = 2
+    # a safety check looked at the plan and refused it
+    REFUSED = 3
+
 
 # How many nested sub-projects to name in a refusal message before "+N more".
 _MAX_SHOWN_SUB_PROJECTS = 3
@@ -75,7 +89,7 @@ def print_plan(plan: core.Plan) -> None:
 
 def check_refusals(
     plan: core.Plan, *, heal: bool, force: bool, on_conflict: str
-) -> int | None:
+) -> ExitCode | None:
     """Apply every up-front gate in order; return an exit code to stop, or None to go.
 
     Order is load-bearing: move-dir state, partial migration, config collision, the
@@ -88,7 +102,7 @@ def check_refusals(
             else "neither the old nor the new directory exists"
         )
         print(f"Refusing --move-dir: {where}; resolve it by hand first.")
-        return 3
+        return ExitCode.REFUSED
 
     if plan.sub_projects:
         shown = ", ".join(plan.sub_projects[:_MAX_SHOWN_SUB_PROJECTS])
@@ -101,14 +115,14 @@ def check_refusals(
             f" {plan.old_stored}: {shown}."
             f" Move each first, e.g. claude-mv {example} {target}"
         )
-        return 3
+        return ExitCode.REFUSED
 
     if plan.mixed and not heal:
         print(
             "Refusing: this project's sessions mix old and new cwd references, which"
             " looks like a partial migration. Re-run with --heal to finish it."
         )
-        return 3
+        return ExitCode.REFUSED
 
     if plan.cjson_collisions:
         joined = ", ".join(plan.cjson_collisions)
@@ -116,11 +130,11 @@ def check_refusals(
             f"Refusing: .claude.json already has an entry for {joined} that differs"
             " from the one being migrated. Remove one by hand, then re-run."
         )
-        return 3
+        return ExitCode.REFUSED
 
     if not plan.any_work:
         print("Already migrated; nothing to do." if plan.migrated else "Nothing to do.")
-        return 0
+        return ExitCode.OK
 
     if plan.conflict:
         print(
@@ -133,12 +147,12 @@ def check_refusals(
                 " project (encoding collision)."
                 " Re-run with --force only if you are sure."
             )
-            return 3
+            return ExitCode.REFUSED
         if on_conflict == "abort":
             print(
                 "Destination exists. Re-run with --on-conflict merge|clean to proceed."
             )
-            return 3
+            return ExitCode.REFUSED
 
     return None
 
@@ -161,7 +175,7 @@ def claude_mv(
     force: bool = False,
     claude_dir: Path = core.DEFAULT_CLAUDE_DIR,
     claude_json: Path = core.DEFAULT_CLAUDE_JSON,
-) -> int:
+) -> ExitCode:
     """Repoint Claude Code's bookkeeping from an old project path to a new one.
 
     Args:
@@ -207,12 +221,12 @@ def claude_mv(
     new_abs = core.to_abs(new)
     if old_abs == new_abs:
         print("Old and new paths resolve to the same location; nothing to do.")
-        return 2
+        return ExitCode.USAGE
     # Nested paths break the prefix remap: the result stays under `old`, so the rewrite
     # is neither reversible nor idempotent (a re-run would append again). Refuse.
     if core.is_under(new_abs, old_abs) or core.is_under(old_abs, new_abs):
         print("Refusing: the old and new paths overlap (one is inside the other).")
-        return 2
+        return ExitCode.USAGE
 
     plan = core.resolve_plan(
         old_abs,
@@ -230,15 +244,15 @@ def claude_mv(
 
     if dry_run:
         print("Dry run: no changes made.")
-        return 0
+        return ExitCode.OK
 
     if not yes:
         if not sys.stdin.isatty():
             print("Refusing to proceed without --yes in a non-interactive shell.")
-            return 1
+            return ExitCode.DECLINED
         if not _confirm("Proceed? [y/N] "):
             print("Aborted.")
-            return 1
+            return ExitCode.DECLINED
 
     try:
         warnings = core.execute(plan, on_conflict=on_conflict, report=print)
@@ -250,7 +264,7 @@ def claude_mv(
     print("Done.")
     for w in warnings:
         print(f"  note: {w}")
-    return 0
+    return ExitCode.OK
 
 
 # --- Entry point ----------------------------------------------------------------------
