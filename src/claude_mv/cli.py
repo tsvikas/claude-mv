@@ -86,7 +86,7 @@ def check_refusals(
             else "neither the old nor the new directory exists"
         )
         print(f"Refusing --move-dir: {where}; resolve it by hand first.")
-        return 2
+        return 3
 
     if plan.sub_projects:
         shown = ", ".join(plan.sub_projects[:_MAX_SHOWN_SUB_PROJECTS])
@@ -99,14 +99,14 @@ def check_refusals(
             f" {plan.old_stored}: {shown}."
             f" Move each first, e.g. claude-mv {example} {target}"
         )
-        return 2
+        return 3
 
     if plan.mixed and not heal:
         print(
             "Refusing: this project's sessions mix old and new cwd references, which"
             " looks like a partial migration. Re-run with --heal to finish it."
         )
-        return 2
+        return 3
 
     if plan.cjson_collisions:
         joined = ", ".join(plan.cjson_collisions)
@@ -114,7 +114,7 @@ def check_refusals(
             f"Refusing: .claude.json already has an entry for {joined} that differs"
             " from the one being migrated. Remove one by hand, then re-run."
         )
-        return 2
+        return 3
 
     if not plan.any_work:
         print("Already migrated; nothing to do." if plan.migrated else "Nothing to do.")
@@ -131,12 +131,12 @@ def check_refusals(
                 " project (encoding collision)."
                 " Re-run with --force only if you are sure."
             )
-            return 2
+            return 3
         if on_conflict == "abort":
             print(
                 "Destination exists. Re-run with --on-conflict merge|clean to proceed."
             )
-            return 2
+            return 3
 
     return None
 

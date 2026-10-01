@@ -168,7 +168,7 @@ def test_resume_rewrite_content(tmp_path: Path) -> None:
 def test_conflict_abort(tmp_path: Path) -> None:
     cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}], E_NEW: [{"cwd": NEW}]})
     code, out = run(cd, cj, OLD, NEW)
-    assert code == 2
+    assert code == 3
     assert "Destination exists" in out
 
 
@@ -198,7 +198,7 @@ def test_collision_guard_refuses_unrelated(tmp_path: Path) -> None:
         sessions={E_OLD: [{"cwd": OLD}], E_NEW: [{"cwd": "/Users/me.proj2"}]},
     )
     code, out = run(cd, cj, OLD, NEW, on_conflict="merge")
-    assert code == 2
+    assert code == 3
     assert "different" in out
     assert "collision" in out
 
@@ -222,7 +222,7 @@ def test_move_dir_bad_both(tmp_path: Path) -> None:
     real_new.mkdir(parents=True)
     cd, cj = build(tmp_path, sessions={enc(str(real_old)): [{"cwd": str(real_old)}]})
     code, out = run(cd, cj, str(real_old), str(real_new), move_dir=True)
-    assert code == 2
+    assert code == 3
     assert "both" in out.lower()
 
 
@@ -231,7 +231,7 @@ def test_move_dir_bad_neither(tmp_path: Path) -> None:
     real_new = tmp_path / "real" / "proj2"
     cd, cj = build(tmp_path, sessions={enc(str(real_old)): [{"cwd": str(real_old)}]})
     code, out = run(cd, cj, str(real_old), str(real_new), move_dir=True)
-    assert code == 2
+    assert code == 3
     assert "neither" in out.lower()
 
 
@@ -290,7 +290,7 @@ def test_sub_project_refused(tmp_path: Path) -> None:
         history=[{"project": "/a"}, {"project": "/a/c"}],
     )
     code, out = run(cd, cj, "/a", "/b")
-    assert code == 2
+    assert code == 3
     assert "separate project" in out
     assert (cd / "projects" / enc("/a")).exists()  # untouched
     projects = [
@@ -336,7 +336,7 @@ def test_claude_json_collision_refused(tmp_path: Path) -> None:
     }
     cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]}, cjson=cjson)
     code, out = run(cd, cj, OLD, NEW)
-    assert code == 2
+    assert code == 3
     assert ".claude.json" in out
     got = json.loads(cj.read_text())
     assert got["projects"][OLD] == {"allowedTools": ["Bash"]}  # nothing dropped
@@ -358,7 +358,7 @@ def test_dry_run_conflict_returns_2(tmp_path: Path) -> None:
     # conflict refusal is evaluated before the dry-run gate, so exit is 2 not 0
     cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}], E_NEW: [{"cwd": NEW}]})
     code, _out = run(cd, cj, OLD, NEW, dry_run=True)
-    assert code == 2
+    assert code == 3
 
 
 def test_rollback_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -425,7 +425,7 @@ def test_mixed_refused_then_heal(tmp_path: Path) -> None:
     (pdir / "new.jsonl").write_text(jline({"cwd": NEW}))
     (pdir / "old.jsonl").write_text(jline({"cwd": OLD}))
     code, out = run(cd, cj, OLD, NEW)
-    assert code == 2
+    assert code == 3
     assert "partial migration" in out
     assert OLD in cwds(cd, E_NEW)  # untouched
     code, _out = run(cd, cj, OLD, NEW, heal=True)
