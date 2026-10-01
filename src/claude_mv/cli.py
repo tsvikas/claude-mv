@@ -6,8 +6,10 @@ engine in :mod:`claude_mv.core` stays print-free.
 """
 
 import sys
+import traceback
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 
 from cyclopts import App, Parameter
 
@@ -141,8 +143,12 @@ def check_refusals(
     return None
 
 
-@app.default
-def main(
+# --- Commands -------------------------------------------------------------------------
+# This is the part to replace. `@app.default()` runs when no subcommand is
+# given, so switch these to `@app.command()` once there is more than one, and
+# keep the exit codes each returns listed in its docstring.
+@app.default()
+def claude_mv(
     old: str,
     new: str,
     *,
@@ -158,39 +164,44 @@ def main(
 ) -> int:
     """Repoint Claude Code's bookkeeping from an old project path to a new one.
 
-    Parameters
-    ----------
-    old
-        The project's old absolute path (before the rename/move). `~`, relative paths,
-        and `..` are resolved. The directory need not still exist.
-    new
-        The project's new absolute path (after the rename/move).
-    on_conflict
-        What to do if the destination already has Claude history: `abort` (default),
-        `merge` old sessions into it, or `clean` (back up and replace it). `merge` and
-        `clean` refuse unless the existing history actually belongs to this project.
-    move_dir
-        Also move the real project directory from `old` to `new` (default: leave the
-        filesystem alone and only fix `~/.claude`).
-    rewrite_content
-        Also replace incidental path mentions inside session files and history.jsonl
-        (logged shell commands, captured output), not just the `cwd`/`project` pointer
-        fields. Off by default, since that text is a record of what actually happened.
-    heal
-        Proceed even when the project is in a partial-migration state (its sessions mix
-        old and new `cwd` references), finishing the move. Without it such a state is
-        refused rather than guessed at.
-    dry_run
-        Show what would change and touch nothing.
-    yes
-        Skip the confirmation prompt. Required to proceed in a non-interactive shell.
-    force
-        Override the safety check that the destination history belongs to this project.
-    claude_dir
-        Location of the Claude data directory (default: `~/.claude`). For testing.
-    claude_json
-        Location of Claude's per-project config file (default: `~/.claude.json`).
-        For testing.
+    Args:
+        old: The project's old absolute path (before the rename/move). `~`,
+            relative paths, and `..` are resolved. The directory need not still
+            exist.
+        new: The project's new absolute path (after the rename/move).
+        on_conflict: What to do if the destination already has Claude history:
+            `abort` (default), `merge` old sessions into it, or `clean` (back up
+            and replace it). `merge` and `clean` refuse unless the existing
+            history actually belongs to this project.
+        move_dir: Also move the real project directory from `old` to `new`
+            (default: leave the filesystem alone and only fix `~/.claude`).
+        rewrite_content: Also replace incidental path mentions inside session
+            files and history.jsonl (logged shell commands, captured output), not
+            just the `cwd`/`project` pointer fields. Off by default, since that
+            text is a record of what actually happened.
+        heal: Proceed even when the project is in a partial-migration state (its
+            sessions mix old and new `cwd` references), finishing the move.
+            Without it such a state is refused rather than guessed at.
+        dry_run: Show what would change and touch nothing.
+        yes: Skip the confirmation prompt. Required to proceed in a
+            non-interactive shell.
+        force: Override the safety check that the destination history belongs to
+            this project.
+        claude_dir: Location of the Claude data directory (default: `~/.claude`).
+            For testing.
+        claude_json: Location of Claude's per-project config file (default:
+            `~/.claude.json`). For testing.
+
+    Returns:
+        The process exit code.
+
+    Exit Codes:
+        0: Success, including a dry run and nothing to do.
+        1: The paths are identical or overlap, or the move was not confirmed.
+        2: Invalid usage.
+        3: The move was refused by a safety check.
+        64-78: Reserved, an internal failure.
+        129-159: Reserved, terminated by signal N, as 128 + N.
     """
     old_abs = core.to_abs(old)
     new_abs = core.to_abs(new)
@@ -240,3 +251,49 @@ def main(
     for w in warnings:
         print(f"  note: {w}")
     return 0
+
+
+# --- Entry point ----------------------------------------------------------------------
+# Maps the commands above onto exit codes, and is what `[project.scripts]` and
+# `__main__` both call.
+
+# Cyclopts itself exits 2 on invalid usage. These are sysexits(3) codes.
+# `os.EX_*` holds the same values but only exists on Unix, so they are inlined
+# to keep the CLI importable on Windows.
+EX_NOINPUT = 66
+EX_UNAVAILABLE = 69
+EX_SOFTWARE = 70
+EX_NOPERM = 77
+
+
+def _fail(exc: Exception, code: int) -> NoReturn:
+    """Report `exc` on stderr and exit with `code`."""
+    print(f"error: {exc}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main(tokens: Sequence[str] | None = None) -> None:
+    """Run the CLI, reporting failures and mapping them onto exit codes.
+
+    Args:
+        tokens: The command line to parse. Defaults to `sys.argv[1:]`.
+    """
+    try:
+        # `tokens` is a parameter so that tests can pass a command line here.
+        # Under pytest, a bare `app()` warns, since it would parse pytest's own
+        # argv, and a test that does so passes while testing nothing.
+        app(tokens)
+    # Nothing reports the errors below, so without `_fail` the CLI would exit on
+    # a bare code and no output. Match on the exception rather than on
+    # `type(exc)`, so that subclasses such as ConnectionRefusedError still land
+    # on the right code. Specific OSError subclasses must precede any bare
+    # `except OSError`, which would otherwise swallow them.
+    except FileNotFoundError as exc:
+        _fail(exc, EX_NOINPUT)
+    except PermissionError as exc:
+        _fail(exc, EX_NOPERM)
+    except ConnectionError as exc:
+        _fail(exc, EX_UNAVAILABLE)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        sys.exit(EX_SOFTWARE)

@@ -11,6 +11,14 @@ ci:
   autofix_commit_msg: '[pre-commit.ci] 🎨 pre-commit fixes'
   autoupdate_schedule: quarterly
 
+# prek update config (pre-commit warns about this key, and ignores it)
+update:
+  repos:
+    # the fork also moves minor tags (v1.17) to off-branch commits for its Docker
+    # action; only take exact releases
+    https://github.com/kjanat/actionlint:
+      include_tags: "v*.*.*"
+
 repos:
   # Sync Python and pre-commit package versions
   # pyproject.toml -> uv.lock
@@ -142,7 +150,7 @@ repos:
 
   # Python files
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.21
+    rev: v0.16.9
     hooks:
       - id: ruff-check
         alias: ruff-isort
@@ -151,8 +159,9 @@ repos:
       - id: ruff-format
         types_or: [python, pyi, jupyter, markdown]
       - id: ruff-check
+        types_or: [python, pyi, jupyter, pyproject]
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.2.0
+    rev: v2.3.1
     hooks:
       - id: mypy
         name: mypy (without imports)
@@ -191,8 +200,9 @@ repos:
       - id: check-github-actions
       - id: check-github-workflows
       - id: check-readthedocs
-  - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.12
+  # Maintained fork of rhysd/actionlint (inactive since 2026-04), supports `uses: $/`
+  - repo: https://github.com/kjanat/actionlint
+    rev: v1.8.0
     hooks:
       - id: actionlint
   - repo: https://github.com/zizmorcore/zizmor-pre-commit

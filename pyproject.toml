@@ -44,14 +44,14 @@ urls.Issues = "https://github.com/tsvikas/claude-mv/issues"
 
 requires-python = ">=3.12"
 dependencies = [
-  "cyclopts >=4",
+  "cyclopts >=5",
 ]
 
 [project.optional-dependencies]
 # optional_name = ["some_package >=1.0"]
 
 [project.scripts]
-claude-mv = "claude_mv.cli:app"
+claude-mv = "claude_mv.cli:main"
 
 [project.gui-scripts]
 # claude-mv = "claude_mv.gui:app.run"
@@ -61,8 +61,8 @@ claude-mv = "claude_mv.cli:app"
 dev = [
   ## used in the justfile
   "rust-just ~=1.0",
-  "prek ~=0.4.0",
-  "ruff ~=0.15.0",
+  "prek ~=0.5.0",
+  "ruff ~=0.16.0",
   ## can be used for debug
   "icecream >=2",
   ## can be used for REPL
@@ -95,7 +95,7 @@ docs = [
   "mkdocs-section-index ~=0.3.0",
 ]
 typing = [
-  "mypy ~=2.2.0",
+  "mypy ~=2.3.0",
   "ty ~=0.0",
   # add "*-stubs" and "types-*" packages here (">=0")
 ]
@@ -170,7 +170,7 @@ mypy_path = "stubs"
 fixed_format_cache = true
 # set the platform
 python_version = "3.12"
-# enable checks [last updated: mypy 2.2]
+# enable checks [last updated: mypy 2.3]
 strict = true
 strict_equality_for_none = true
 disallow_any_unimported = true
@@ -199,15 +199,8 @@ DEP002 = [
 ]
 
 
-[tool.ruff]
-# discover Markdown files so `ruff format` can format their code blocks
-extend-include = ["*.md"]
-
-
 [tool.ruff.format]
 docstring-code-format = true
-# enable preview mode to format code blocks inside Markdown files
-preview = true
 
 
 [tool.ruff.lint]
@@ -223,6 +216,8 @@ ignore = [
   # needed only in large codebases
   "TD002",    # flake8-todos/missing-todo-author
   "TD003",    # flake8-todos/missing-todo-link
+  # needed only with a per-file copyright policy
+  "CPY001",   # flake8-copyright/missing-copyright-notice
   # incompatible with other rules
   "COM812",   # flake8-commas/missing-trailing-comma (incompatible with black)
   # disagree:
@@ -236,7 +231,11 @@ ignore = [
   #"S101",     # flake8-bandit/assert
   #"FIX00",    # flake8-fixme/line-contains-*
   #"ERA001",   # eradicate/commented-out-code
-  "PLR091",   # PyLint-Refactor/too-many-*
+  "PLR0911",  # PyLint-Refactor/too-many-return-statements
+  "PLR0912",  # PyLint-Refactor/too-many-branches
+  "PLR0913",  # PyLint-Refactor/too-many-arguments
+  "PLR0915",  # PyLint-Refactor/too-many-statements
+  "PLR0917",  # PyLint-Refactor/too-many-positional-arguments
   #"TRY003",   # tryceratops/raise-vanilla-args
 ]
 # objects that should be treated equivalently to a logging.Logger object.
@@ -275,6 +274,11 @@ flake8-comprehensions.allow-dict-calls-with-keyword-arguments = true
   "TC002",    # flake8-type-checking/typing-only-*-import
   "TC003",    # flake8-type-checking/typing-only-*-import
 ]
+
+
+[tool.typos.default.extend-identifiers]
+# a ruff rule code, not a misspelling of "copy"
+CPY001 = "CPY001"
 
 
 [tool.pylint]

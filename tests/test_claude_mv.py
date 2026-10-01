@@ -1,7 +1,7 @@
 """Behavior tests for the claude-mv engine and CLI.
 
-They drive `cli.main()` directly against a throwaway `~/.claude`-shaped tree built under
-pytest's `tmp_path`, and assert on the exit code plus the resulting on-disk state.
+They drive `cli.claude_mv()` directly against a throwaway `~/.claude`-shaped tree built
+under pytest's `tmp_path`, and assert on the exit code plus the resulting on-disk state.
 """
 
 import contextlib
@@ -69,7 +69,7 @@ def run(
 ) -> tuple[int, str]:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        code = cli.main(
+        code = cli.claude_mv(
             old,
             new,
             claude_dir=claude_dir,

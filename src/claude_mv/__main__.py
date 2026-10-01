@@ -3,6 +3,6 @@
 use `python -m claude_mv` to run the cli
 """
 
-from .cli import app
+from .cli import main
 
-app()
+main()

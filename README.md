@@ -97,7 +97,7 @@ Before it changes anything it writes a backup under `~/.claude/claude-mv-backups
 ## Contributing
 
 Interested in contributing?
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guideline.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 [codecov-badge]: https://codecov.io/gh/tsvikas/claude-mv/graph/badge.svg
 [codecov-link]: https://codecov.io/gh/tsvikas/claude-mv
