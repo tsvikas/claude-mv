@@ -19,11 +19,11 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_app_rejects_overlapping_paths(capsys: pytest.CaptureFixture[str]) -> None:
-    # Drives cyclopts parsing through to the command: overlapping paths are refused
-    # (exit 1) before any disk is touched.
+    # Drives cyclopts parsing through to the command: overlapping paths are rejected
+    # as invalid usage (exit 2) before any disk is touched.
     with pytest.raises(SystemExit) as exc_info:
         app(["/a/proj", "/a/proj/sub"])
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == 2
     assert "inside the other" in capsys.readouterr().out
 
 

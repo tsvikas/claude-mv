@@ -197,8 +197,8 @@ def claude_mv(
 
     Exit Codes:
         0: Success, including a dry run and nothing to do.
-        1: The paths are identical or overlap, or the move was not confirmed.
-        2: Invalid usage.
+        1: The move was not confirmed.
+        2: Invalid usage, including identical or overlapping paths.
         3: The move was refused by a safety check.
         64-78: Reserved, an internal failure.
         129-159: Reserved, terminated by signal N, as 128 + N.
@@ -207,12 +207,12 @@ def claude_mv(
     new_abs = core.to_abs(new)
     if old_abs == new_abs:
         print("Old and new paths resolve to the same location; nothing to do.")
-        return 1
+        return 2
     # Nested paths break the prefix remap: the result stays under `old`, so the rewrite
     # is neither reversible nor idempotent (a re-run would append again). Refuse.
     if core.is_under(new_abs, old_abs) or core.is_under(old_abs, new_abs):
         print("Refusing: the old and new paths overlap (one is inside the other).")
-        return 1
+        return 2
 
     plan = core.resolve_plan(
         old_abs,

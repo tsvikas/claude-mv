@@ -322,11 +322,19 @@ def test_content_warn_non_idempotent(tmp_path: Path) -> None:
 def test_nested_paths_refused(tmp_path: Path) -> None:
     cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]})
     code, out = run(cd, cj, OLD, OLD + "/app")  # new under old
-    assert code == 1
+    assert code == 2
     assert "inside the other" in out
     assert cwds(cd, E_OLD) == [OLD]  # untouched
     code, _out = run(cd, cj, OLD + "/app", OLD)  # old under new
-    assert code == 1
+    assert code == 2
+
+
+def test_identical_paths_rejected(tmp_path: Path) -> None:
+    cd, cj = build(tmp_path, sessions={E_OLD: [{"cwd": OLD}]})
+    code, out = run(cd, cj, OLD, OLD)
+    assert code == 2
+    assert "same location" in out
+    assert cwds(cd, E_OLD) == [OLD]  # untouched
 
 
 def test_claude_json_collision_refused(tmp_path: Path) -> None:
